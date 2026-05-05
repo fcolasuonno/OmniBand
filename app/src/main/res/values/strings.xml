@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OmniBand</string>
+    <string name="channel_service_name">Device Connection</string>
+    <string name="channel_service_desc">Keeps your gadget connected in the background</string>
+    <string name="notif_connecting">Connecting to device…</string>
+    <string name="notif_connected">Connected</string>
+    <string name="notif_reconnecting">Reconnecting…</string>
+    <string name="notif_disconnected">Disconnected</string>
+    <string name="action_find_device">Find Device</string>
+    <string name="action_disconnect">Disconnect</string>
+    <string name="permission_bluetooth_rationale">OmniBand needs Bluetooth permission to communicate with your smart band or earbuds.</string>
+    <string name="permission_location_rationale">Location permission is required by Android to scan for nearby Bluetooth devices.</string>
+</resources>

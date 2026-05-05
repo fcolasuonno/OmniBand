@@ -1,0 +1,47 @@
+# Built-in Gradle ignores
+.gradle/
+build/
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Log/OS Files
+*.log
+.DS_Store
+
+# Android Studio / IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+# Specifically ignore Studio Bot/AI planning files
+.idea/planningMode.xml
+.idea/studiobot.xml
+captures/
+.externalNativeBuild/
+.cxx/
+output.json
+
+# Generated files
+*.apk
+*.aar
+*.bundle
+
+# Keystore files (NEVER check these into source control)
+*.jks
+*.keystore
+*.p12
+*.pem
+
+# Google Services
+google-services.json
+
+# Android Profiling
+*.hprof
+
+# Kotlin
+.kotlin/
+kotlin-daemon-file.tmp
+
+# KSP generated files (usually under build/, but just in case)
+*.ksp
