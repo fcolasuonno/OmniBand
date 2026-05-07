@@ -1,19 +1,25 @@
 package com.omniband.ble.protocol
 
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
 import timber.log.Timber
 import java.util.UUID
+import kotlin.coroutines.resume
 
 /**
  * Protocol implementation for Sony WF-1000XM5 earbuds.
@@ -45,6 +51,7 @@ import java.util.UUID
  *   - Gadgetbridge Sony Headphones support (José Rebelo's implementation)
  *   - Protocol observed via nRF Connect + Wireshark HCI snoop
  */
+@SuppressLint("MissingPermission")
 class SonyWF1000XM5Protocol : DeviceProtocol {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -53,11 +60,12 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
 
     companion object {
         // Sony WF-1000XM5 BLE service and characteristics
-        val UUID_SERVICE_SONY    = UUID.fromString("75c27625-bd42-d645-0b00-a4acd5dfb3b4")
-        val UUID_CHAR_TX         = UUID.fromString("75c27625-bd42-d645-0b01-a4acd5dfb3b4")
-        val UUID_CHAR_RX         = UUID.fromString("75c27625-bd42-d645-0b02-a4acd5dfb3b4")
-        val UUID_CHAR_BATTERY    = UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb") // Standard battery
-        val UUID_CCCD            = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+        val UUID_SERVICE_SONY: UUID = UUID.fromString("75c27625-bd42-d645-0b00-a4acd5dfb3b4")
+        val UUID_CHAR_TX: UUID = UUID.fromString("75c27625-bd42-d645-0b01-a4acd5dfb3b4")
+        val UUID_CHAR_RX: UUID = UUID.fromString("75c27625-bd42-d645-0b02-a4acd5dfb3b4")
+        val UUID_CHAR_BATTERY: UUID =
+            UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb") // Standard battery
+        val UUID_CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
         // Sony protocol constants
         private const val START_BYTE       = 0x3E.toByte()
@@ -81,7 +89,7 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
     private var txCharacteristic: BluetoothGattCharacteristic? = null
     private var rxCharacteristic: BluetoothGattCharacteristic? = null
     private var isInitialized = false
-    private var initContinuation: kotlinx.coroutines.CancellableContinuation<Boolean>? = null
+    private var initContinuation: CancellableContinuation<Boolean>? = null
 
     // -------------------------------------------------------------------------
     // Initialization
@@ -89,14 +97,14 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
 
     override suspend fun initialize(
         gatt: BluetoothGatt,
-        awaitDescriptorWrite: suspend () -> Unit  // FIX 3 — serialize GATT ops
+        awaitDescriptorWrite: suspend () -> Unit, // FIX 3 — serialize GATT ops
     ): Boolean {
         Timber.i("SonyWF1000XM5: initializing ${gatt.device.address}")
 
         txCharacteristic = gatt.getService(UUID_SERVICE_SONY)?.getCharacteristic(UUID_CHAR_TX)
         rxCharacteristic = gatt.getService(UUID_SERVICE_SONY)?.getCharacteristic(UUID_CHAR_RX)
 
-        if (txCharacteristic == null || rxCharacteristic == null) {
+        if ((txCharacteristic == null) || (rxCharacteristic == null)) {
             Timber.e("SonyWF1000XM5: Sony control service not found — trying standard battery service")
             val batteryChar = gatt.getService(UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb"))
                 ?.getCharacteristic(UUID_CHAR_BATTERY)
@@ -115,24 +123,24 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
 
         // Send Sony initialization handshake with timeout
         return try {
-            kotlinx.coroutines.withTimeout(12_000L) { runSonyHandshake(gatt) }
-        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            withTimeout(12_000L) { runSonyHandshake(gatt) }
+        } catch (_: TimeoutCancellationException) {
             Timber.e("SonyWF1000XM5: init handshake timed out")
-            initContinuation?.resume(false) {}
+            initContinuation?.resume(value = false)
             initContinuation = null
             false
         }
     }
 
     private suspend fun runSonyHandshake(gatt: BluetoothGatt): Boolean {
-        return kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+        return suspendCancellableCoroutine { cont ->
             initContinuation = cont
             // Sony init packet: [0x3E][0x00][seqId][0x00][0x00][checksum]
             val initPacket = buildPacket(DATA_TYPE_INIT, byteArrayOf(0x00, 0x00))
             val wrote = gatt.safeWriteCharacteristic(txCharacteristic!!, initPacket)
             if (!wrote) {
                 Timber.e("SonyWF1000XM5: failed to send init packet")
-                cont.resume(false) {}
+                cont.resume(value = false)
             }
             cont.invokeOnCancellation { initContinuation = null }
         }
@@ -145,7 +153,7 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
     override fun onCharacteristicChanged(
         gatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic,
-        value: ByteArray
+        value: ByteArray,
     ): Boolean {
         return when (characteristic.uuid) {
             UUID_CHAR_RX -> {
@@ -164,7 +172,7 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
     }
 
     private fun parseSonyPacket(gatt: BluetoothGatt, data: ByteArray) {
-        if (data.size < 3 || data[0] != START_BYTE) {
+        if (data.size < 3 || (data[0] != START_BYTE)) {
             Timber.w("SonyWF1000XM5: invalid packet received")
             return
         }
@@ -185,7 +193,7 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
                     delay(100)
                     requestAncMode(gatt)
                 }
-                initContinuation?.resume(true) {}
+                initContinuation?.resume(value = true)
             }
             DATA_TYPE_BATTERY -> parseBatteryReport(payload)
             DATA_TYPE_ANC -> parseAncReport(payload)
@@ -204,8 +212,8 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
         // Sony reports L/R/Case battery separately
         // Format: [leftBattery, rightBattery, caseBattery] (0-10 scale → * 10 for percent)
         val leftBattery  = (payload[0].toInt() and 0xFF) * 10
-        val rightBattery = if (payload.size > 1) (payload[1].toInt() and 0xFF) * 10 else leftBattery
-        val caseBattery  = if (payload.size > 2) (payload[2].toInt() and 0xFF) * 10 else 0
+        val rightBattery = (payload[1].toInt() and 0xFF) * 10
+        val caseBattery = (payload[2].toInt() and 0xFF) * 10
 
         // Emit average of L+R
         val avgBattery = (leftBattery + rightBattery) / 2
@@ -215,8 +223,7 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
 
     private fun parseAncReport(payload: ByteArray) {
         if (payload.isEmpty()) return
-        val ancValue = payload[0].toInt() and 0xFF
-        val mode = when (ancValue) {
+        val mode = when (payload[0].toInt() and 0xFF) {
             ANC_NC      -> ANCMode.NOISE_CANCELLING
             ANC_AMBIENT -> ANCMode.AMBIENT
             ANC_WIND    -> ANCMode.WIND_REDUCTION

@@ -35,7 +35,7 @@ import kotlin.experimental.xor
  */
 @SuppressLint("MissingPermission")
 class MiBand7Protocol(
-    private val authKey: ByteArray
+    private val authKey: ByteArray,
 ) : DeviceProtocol {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -53,8 +53,8 @@ class MiBand7Protocol(
         
         // Default ASCII key used by ZeppOS if no custom key is provided
         private val DEFAULT_AUTH_KEY = byteArrayOf(
-            0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 
-            0x38, 0x39, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45
+            0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+            0x38, 0x39, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45,
         )
     }
 
@@ -87,7 +87,7 @@ class MiBand7Protocol(
 
     override suspend fun initialize(
         gatt: BluetoothGatt,
-        awaitDescriptorWrite: suspend () -> Unit
+        awaitDescriptorWrite: suspend () -> Unit,
     ): Boolean {
         Timber.i("MiBand7: initializing ${gatt.device.address} (MTU=$negotiatedMtu)")
 
@@ -97,7 +97,7 @@ class MiBand7Protocol(
         }
         hrChar = gatt.getService(UUID_SERVICE_HR)?.getCharacteristic(UUID_CHAR_HR_MEASUREMENT)
 
-        if (chunkedWrite == null || chunkedRead == null) {
+        if ((chunkedWrite == null) || (chunkedRead == null)) {
             Timber.e("MiBand7: chunked characteristics not found")
             return false
         }
@@ -118,7 +118,7 @@ class MiBand7Protocol(
             withTimeout(AUTH_TIMEOUT_MS) { runEcdhHandshake(gatt) }
         } catch (e: Exception) {
             Timber.e(e, "MiBand7: auth handshake failed")
-            authContinuation?.resume(false)
+            authContinuation?.resume(value = false)
             authContinuation = null
             false
         }
@@ -157,7 +157,7 @@ class MiBand7Protocol(
     override fun onCharacteristicChanged(
         gatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic,
-        value: ByteArray
+        value: ByteArray,
     ): Boolean = when (characteristic.uuid) {
         UUID_CHAR_CHUNKED_READ -> {
             decoder.decode(value)?.let { msg ->
@@ -188,7 +188,7 @@ class MiBand7Protocol(
     }
 
     private fun handleAuth(gatt: BluetoothGatt, payload: ByteArray) {
-        if (payload.isEmpty() || payload[0] != Huami2021Chunked.AUTH_RESP_PREFIX) return
+        if (payload.isEmpty() || (payload[0] != Huami2021Chunked.AUTH_RESP_PREFIX)) return
 
         when (payload[1]) {
             Huami2021Chunked.AUTH_CMD_PUB_KEY -> {
@@ -226,7 +226,7 @@ class MiBand7Protocol(
             }
 
             Huami2021Chunked.AUTH_CMD_SESSION_KEY -> {
-                val ok = payload.size >= 3 && payload[2] == Huami2021Chunked.AUTH_SUCCESS
+                val ok = (payload.size >= 3) && (payload[2] == Huami2021Chunked.AUTH_SUCCESS)
                 if (ok) {
                     Timber.i("MiBand7: auth SUCCESS ✓")
                     isAuthenticated = true
@@ -246,7 +246,7 @@ class MiBand7Protocol(
     }
 
     private fun failAuth() {
-        authContinuation?.resume(false)
+        authContinuation?.resume(value = false)
         cleanupAuth()
     }
 
@@ -261,7 +261,7 @@ class MiBand7Protocol(
     private fun parseChunkedHr(p: ByteArray) {
         if (p.size < 3) return
         val bpm = p[2].toInt() and 0xFF
-        if (bpm in 30..250) scope.launch { _events.emit(DeviceEvent.HeartRate(bpm)) }
+        if (bpm in (30..250)) scope.launch { _events.emit(DeviceEvent.HeartRate(bpm)) }
     }
 
     private fun parseStdHr(data: ByteArray) {
@@ -269,7 +269,7 @@ class MiBand7Protocol(
         val flags = data[0].toInt() and 0xFF
         val bpm = if (flags and 0x01 == 0) data[1].toInt() and 0xFF
                   else ByteBuffer.wrap(data, 1, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xFFFF
-        if (bpm in 30..250) scope.launch { _events.emit(DeviceEvent.HeartRate(bpm)) }
+        if (bpm in (30..250)) scope.launch { _events.emit(DeviceEvent.HeartRate(bpm)) }
     }
 
     private fun parseBattery(p: ByteArray) {
@@ -291,7 +291,7 @@ class MiBand7Protocol(
     private fun parseSpo2(p: ByteArray) {
         if (p.size < 2 || p[0].toInt() and 0xFF != 0x01) return
         val v = p[1].toInt() and 0xFF
-        if (v in 50..100) scope.launch { _events.emit(DeviceEvent.SpO2(v)) }
+        if (v in (50..100)) scope.launch { _events.emit(DeviceEvent.SpO2(v)) }
     }
 
     private fun parseSleep(p: ByteArray) {
@@ -324,12 +324,12 @@ class MiBand7Protocol(
         val tz = (c.timeZone.rawOffset / 60_000 / 15).toByte()
         val p = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN).run {
             put(0x01.toByte())
-            putShort(c.get(Calendar.YEAR).toShort())
-            put((c.get(Calendar.MONTH) + 1).toByte())
-            put(c.get(Calendar.DAY_OF_MONTH).toByte())
-            put(c.get(Calendar.HOUR_OF_DAY).toByte())
-            put(c.get(Calendar.MINUTE).toByte())
-            put(c.get(Calendar.SECOND).toByte())
+            putShort(c[Calendar.YEAR].toShort())
+            put((c[Calendar.MONTH] + 1).toByte())
+            put(c[Calendar.DAY_OF_MONTH].toByte())
+            put(c[Calendar.HOUR_OF_DAY].toByte())
+            put(c[Calendar.MINUTE].toByte())
+            put(c[Calendar.SECOND].toByte())
             put(tz)
             array()
         }
@@ -341,12 +341,12 @@ class MiBand7Protocol(
     }
 
     override suspend fun onSleepTrackingStarted(gatt: BluetoothGatt) {
-        setHeartRateMonitoring(gatt, true)
+        setHeartRateMonitoring(gatt, continuous = true)
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_SPO2, byteArrayOf(0x01, 0x01))
     }
 
     override suspend fun onSleepTrackingStopped(gatt: BluetoothGatt) {
-        setHeartRateMonitoring(gatt, false)
+        setHeartRateMonitoring(gatt, continuous = false)
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_SPO2, byteArrayOf(0x01, 0x00))
     }
 
@@ -410,7 +410,7 @@ class MiBand7Protocol(
         }
 
     override fun destroy() {
-        authContinuation?.resume(false)
+        authContinuation?.resume(value = false)
         cleanupAuth()
         scope.cancel()
     }

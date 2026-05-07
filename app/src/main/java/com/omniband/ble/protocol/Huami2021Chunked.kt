@@ -1,6 +1,5 @@
 package com.omniband.ble.protocol
 
-import timber.log.Timber
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -89,7 +88,28 @@ object Huami2021Chunked {
             val handle: Byte, 
             val count: Byte, 
             val needsAck: Boolean
-        )
+        ) {
+            override fun equals(other: Any?): Boolean {
+                if (this === other) return true
+                if (javaClass != other?.javaClass) return false
+                other as Message
+                if (endpoint != other.endpoint) return false
+                if (!payload.contentEquals(other.payload)) return false
+                if (handle != other.handle) return false
+                if (count != other.count) return false
+                if (needsAck != other.needsAck) return false
+                return true
+            }
+
+            override fun hashCode(): Int {
+                var result = endpoint.toInt()
+                result = 31 * result + payload.contentHashCode()
+                result = 31 * result + handle.toInt()
+                result = 31 * result + count.toInt()
+                result = 31 * result + (if (needsAck) 1 else 0)
+                return result
+            }
+        }
 
         fun decode(data: ByteArray): Message? {
             if (data.size < 5 || data[0] != 0x03.toByte()) return null

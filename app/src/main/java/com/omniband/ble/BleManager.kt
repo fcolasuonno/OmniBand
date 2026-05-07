@@ -1,6 +1,7 @@
 package com.omniband.ble
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
@@ -10,7 +11,6 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
@@ -25,7 +25,6 @@ import com.omniband.ble.protocol.MiBand7Protocol
 import com.omniband.ble.protocol.SonyWF1000XM5Protocol
 import com.omniband.ble.protocol.VibratePattern
 import com.omniband.ble.reconnect.ReconnectionManager
-import com.omniband.data.repository.UserPreferencesRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,10 +33,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -77,10 +74,10 @@ import javax.inject.Singleton
  *     the stale-cache variant of GATT error 133.
  * ═══════════════════════════════════════════════════════════════════
  */
+@SuppressLint("MissingPermission")
 @Singleton
 class BleManager @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val preferencesRepository: UserPreferencesRepository
+    @param:ApplicationContext private val context: Context,
 ) {
 
     private val managerScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -130,7 +127,9 @@ class BleManager @Inject constructor(
             )
             targetDevice?.let { connectToDevice(it) } ?: false
         },
-        onMaxAttemptsReached = { _connectionState.value = ConnectionState.Disconnected }
+        onMaxAttemptsReached = {
+            _connectionState.value = ConnectionState.Disconnected
+        }
     )
 
     // ── Scanning ────────────────────────────────────────────────────
@@ -201,12 +200,13 @@ class BleManager @Inject constructor(
         Timber.i("BleManager: connecting to ${device.address} (${targetDeviceType?.displayName})")
 
         // autoConnect=false → faster initial connection
-        // We supply a Handler-backed callback on the main looper for reliable delivery
+        @Suppress("DEPRECATION")
         activeGatt = device.connectGatt(
             context,
             false,
             gattCallback,
-            BluetoothDevice.TRANSPORT_LE
+            BluetoothDevice.TRANSPORT_LE,
+            BluetoothDevice.PHY_LE_1M_MASK
         )
         return activeGatt != null
     }
@@ -235,7 +235,7 @@ class BleManager @Inject constructor(
 
     private fun refreshGattCache(gatt: BluetoothGatt): Boolean = try {
         val refresh: Method = gatt.javaClass.getMethod("refresh")
-        val result = refresh.invoke(gatt) as? Boolean ?: false
+        val result = (refresh.invoke(gatt) as? Boolean) ?: false
         Timber.d("BleManager: GATT cache refresh = $result")
         result
     } catch (e: Exception) {

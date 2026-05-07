@@ -1,3 +1,4 @@
+@file:Suppress("FunctionName", "ClassName", "LocalVariableName")
 package com.omniband.ble.protocol
 
 /**
@@ -52,7 +53,7 @@ object ECDH_B163 {
     private fun bitvec_degree(x: IntArray): Int {
         var i = BITVEC_NWORDS * 32
         var y = BITVEC_NWORDS
-        while (i > 0 && x[--y] == 0) i -= 32
+        while (i > 0 && (x[--y] == 0)) i -= 32
         if (i != 0) {
             var u32mask = 1 shl 31
             while ((x[y] and u32mask) == 0) {
