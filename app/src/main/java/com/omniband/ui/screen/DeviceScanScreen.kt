@@ -39,11 +39,14 @@ fun DeviceScanScreen(
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
 
     val permissions = rememberMultiplePermissionsState(
-        permissions = listOf(
-            android.Manifest.permission.BLUETOOTH_SCAN,
-            android.Manifest.permission.BLUETOOTH_CONNECT,
-            android.Manifest.permission.ACCESS_FINE_LOCATION
-        )
+        permissions = buildList {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                add(android.Manifest.permission.BLUETOOTH_SCAN)
+                add(android.Manifest.permission.BLUETOOTH_CONNECT)
+            } else {
+                add(android.Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+        }
     )
 
     var showAuthKeyDialog by remember { mutableStateOf<ScannedDevice?>(null) }

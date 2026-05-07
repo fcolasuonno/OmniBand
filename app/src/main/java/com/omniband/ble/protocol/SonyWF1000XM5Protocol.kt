@@ -14,8 +14,6 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.util.UUID
-import android.annotation.SuppressLint
-import kotlin.coroutines.resume
 
 /**
  * Protocol implementation for Sony WF-1000XM5 earbuds.
@@ -55,11 +53,11 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
 
     companion object {
         // Sony WF-1000XM5 BLE service and characteristics
-        val UUID_SERVICE_SONY: UUID    = UUID.fromString("75c27625-bd42-d645-0b00-a4acd5dfb3b4")
-        val UUID_CHAR_TX: UUID         = UUID.fromString("75c27625-bd42-d645-0b01-a4acd5dfb3b4")
-        val UUID_CHAR_RX: UUID         = UUID.fromString("75c27625-bd42-d645-0b02-a4acd5dfb3b4")
-        val UUID_CHAR_BATTERY: UUID    = UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb") // Standard battery
-        val UUID_CCCD: UUID            = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+        val UUID_SERVICE_SONY    = UUID.fromString("75c27625-bd42-d645-0b00-a4acd5dfb3b4")
+        val UUID_CHAR_TX         = UUID.fromString("75c27625-bd42-d645-0b01-a4acd5dfb3b4")
+        val UUID_CHAR_RX         = UUID.fromString("75c27625-bd42-d645-0b02-a4acd5dfb3b4")
+        val UUID_CHAR_BATTERY    = UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb") // Standard battery
+        val UUID_CCCD            = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
         // Sony protocol constants
         private const val START_BYTE       = 0x3E.toByte()
@@ -89,31 +87,41 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
     // Initialization
     // -------------------------------------------------------------------------
 
-    override suspend fun initialize(gatt: BluetoothGatt): Boolean {
+    override suspend fun initialize(
+        gatt: BluetoothGatt,
+        awaitDescriptorWrite: suspend () -> Unit  // FIX 3 — serialize GATT ops
+    ): Boolean {
         Timber.i("SonyWF1000XM5: initializing ${gatt.device.address}")
 
         txCharacteristic = gatt.getService(UUID_SERVICE_SONY)?.getCharacteristic(UUID_CHAR_TX)
         rxCharacteristic = gatt.getService(UUID_SERVICE_SONY)?.getCharacteristic(UUID_CHAR_RX)
 
-        if ((txCharacteristic == null) || (rxCharacteristic == null)) {
-            Timber.e("SonyWF1000XM5: Sony control service not found — checking standard battery service")
-            // Fallback: might only have standard BLE battery service exposed
+        if (txCharacteristic == null || rxCharacteristic == null) {
+            Timber.e("SonyWF1000XM5: Sony control service not found — trying standard battery service")
             val batteryChar = gatt.getService(UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb"))
                 ?.getCharacteristic(UUID_CHAR_BATTERY)
             if (batteryChar != null) {
                 enableNotification(gatt, batteryChar)
+                awaitDescriptorWrite()   // FIX 3: wait before returning
                 _events.emit(DeviceEvent.DeviceReady)
                 return true
             }
             return false
         }
 
-        // Enable RX notifications
+        // Enable RX notifications and wait for the CCCD write to complete
         enableNotification(gatt, rxCharacteristic!!)
-        delay(200)
+        awaitDescriptorWrite()   // FIX 3: replaces unreliable delay(200)
 
-        // Send Sony initialization handshake
-        return runSonyHandshake(gatt)
+        // Send Sony initialization handshake with timeout
+        return try {
+            kotlinx.coroutines.withTimeout(12_000L) { runSonyHandshake(gatt) }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            Timber.e("SonyWF1000XM5: init handshake timed out")
+            initContinuation?.resume(false) {}
+            initContinuation = null
+            false
+        }
     }
 
     private suspend fun runSonyHandshake(gatt: BluetoothGatt): Boolean {
@@ -124,7 +132,7 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
             val wrote = gatt.safeWriteCharacteristic(txCharacteristic!!, initPacket)
             if (!wrote) {
                 Timber.e("SonyWF1000XM5: failed to send init packet")
-                cont.resume(false)
+                cont.resume(false) {}
             }
             cont.invokeOnCancellation { initContinuation = null }
         }
@@ -137,7 +145,7 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
     override fun onCharacteristicChanged(
         gatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic,
-        value: ByteArray,
+        value: ByteArray
     ): Boolean {
         return when (characteristic.uuid) {
             UUID_CHAR_RX -> {
@@ -177,7 +185,7 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
                     delay(100)
                     requestAncMode(gatt)
                 }
-                initContinuation?.resume(true)
+                initContinuation?.resume(true) {}
             }
             DATA_TYPE_BATTERY -> parseBatteryReport(payload)
             DATA_TYPE_ANC -> parseAncReport(payload)
@@ -312,15 +320,14 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
         payload.copyInto(packet, 5)
 
         // Checksum: XOR from byte[1] to byte[4+len]
-        var checksum: Byte = 0
+        var checksum = 0
         for (i in 1 until (5 + len)) {
-            checksum = (checksum.toInt() xor packet[i].toInt()).toByte()
+            checksum = checksum xor packet[i].toInt()
         }
-        packet[5 + len] = checksum
+        packet[5 + len] = checksum.toByte()
         return packet
     }
 
-    @SuppressLint("MissingPermission")
     private fun enableNotification(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
         gatt.setCharacteristicNotification(characteristic, true)
         characteristic.getDescriptor(UUID_CCCD)?.let { descriptor ->
@@ -332,7 +339,7 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
                 @Suppress("DEPRECATION")
                 gatt.writeDescriptor(descriptor)
             }
-        }
+        } ?: Timber.w("SonyWF1000XM5: CCCD descriptor not found on ${characteristic.uuid}")
     }
 
     override fun destroy() {

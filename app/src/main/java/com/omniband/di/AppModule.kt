@@ -2,6 +2,7 @@ package com.omniband.di
 
 import android.content.Context
 import androidx.room.Room
+import com.omniband.ble.BleManager
 import com.omniband.data.db.AppDatabase
 import com.omniband.data.db.dao.*
 import com.omniband.data.repository.DeviceRepository
@@ -22,7 +23,7 @@ object DatabaseModule {
     @Provides
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "omniband.db")
-            .fallbackToDestructiveMigration(true)
+            .fallbackToDestructiveMigration()
             .build()
 
     @Provides fun provideDeviceDao(db: AppDatabase): DeviceDao = db.deviceDao()
@@ -49,6 +50,6 @@ object RepositoryModule {
         stepsDao: StepsDao,
         sleepDao: SleepDao,
         spo2Dao: SpO2Dao,
-        batteryDao: BatteryDao,
+        batteryDao: BatteryDao
     ): HealthRepository = HealthRepository(heartRateDao, stepsDao, sleepDao, spo2Dao, batteryDao)
 }

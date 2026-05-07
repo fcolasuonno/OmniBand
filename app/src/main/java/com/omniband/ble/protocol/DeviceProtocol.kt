@@ -19,9 +19,18 @@ interface DeviceProtocol {
     /**
      * Called once right after GATT services are discovered.
      * Implementations subscribe to notifications, run auth, and mark the device ready.
+     *
+     * @param awaitDescriptorWrite  Suspend function that completes when the most recently
+     *   issued [BluetoothGatt.writeDescriptor] call is acknowledged by the remote device via
+     *   [BluetoothGattCallback.onDescriptorWrite]. Protocols MUST call this after every
+     *   descriptor write to serialise GATT operations — Android only allows one outstanding
+     *   GATT operation at a time.
      * @return true if initialisation was successful
      */
-    suspend fun initialize(gatt: BluetoothGatt): Boolean
+    suspend fun initialize(
+        gatt: BluetoothGatt,
+        awaitDescriptorWrite: suspend () -> Unit
+    ): Boolean
 
     /**
      * Called when a GATT characteristic has a new value.
@@ -94,7 +103,11 @@ fun BluetoothGatt.safeWriteCharacteristic(
     value: ByteArray,
     writeType: Int = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
 ): Boolean {
-    characteristic.writeType = writeType
-    characteristic.value = value
-    return writeCharacteristic(characteristic)
+    return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+        writeCharacteristic(characteristic, value, writeType) == BluetoothGatt.GATT_SUCCESS
+    } else {
+        @Suppress("DEPRECATION") characteristic.value     = value
+        @Suppress("DEPRECATION") characteristic.writeType = writeType
+        @Suppress("DEPRECATION") writeCharacteristic(characteristic)
+    }
 }

@@ -12,6 +12,7 @@ import com.omniband.data.db.dao.*
 import com.omniband.data.db.entity.*
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -149,7 +150,7 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 
 @Singleton
 class UserPreferencesRepository @Inject constructor(
-    @param:ApplicationContext private val context: Context,
+    @ApplicationContext private val context: Context
 ) {
     private object Keys {
         val ACTIVE_DEVICE_ADDRESS = stringPreferencesKey("active_device_address")

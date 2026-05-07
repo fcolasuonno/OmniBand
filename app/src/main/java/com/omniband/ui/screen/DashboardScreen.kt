@@ -1,5 +1,6 @@
 package com.omniband.ui.screen
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.*
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -10,9 +11,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.BatteryUnknown
-import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
-import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -29,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavController
 import com.omniband.ble.ConnectionState
 import com.omniband.ble.DeviceType
 import com.omniband.ui.theme.*
@@ -36,7 +35,8 @@ import com.omniband.ui.viewmodel.DashboardViewModel
 
 @Composable
 fun DashboardScreen(
-    viewModel: DashboardViewModel = hiltViewModel(),
+    navController: NavController,
+    viewModel: DashboardViewModel = hiltViewModel()
 ) {
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
     val activeDevice by viewModel.activeDevice.collectAsStateWithLifecycle(null)
@@ -99,7 +99,7 @@ fun DashboardScreen(
                     icon = Icons.Filled.Favorite,
                     iconColor = HeartRed,
                     label = "Heart Rate",
-                    value = lastHR?.toString() ?: "--",
+                    value = lastHR?.let { "$it" } ?: "--",
                     unit = "bpm",
                     gradient = Brush.verticalGradient(
                         listOf(HeartRed.copy(alpha = 0.15f), Color.Transparent)
@@ -110,7 +110,7 @@ fun DashboardScreen(
                     icon = Icons.Filled.Bloodtype,
                     iconColor = Color(0xFF2196F3),
                     label = "SpO2",
-                    value = lastSpO2?.toString() ?: "--",
+                    value = lastSpO2?.let { "$it" } ?: "--",
                     unit = "%",
                     gradient = Brush.verticalGradient(
                         listOf(Color(0xFF2196F3).copy(alpha = 0.15f), Color.Transparent)
@@ -195,18 +195,12 @@ fun ConnectionStatusCard(
             )
             if (showActions) {
                 IconButton(onClick = onFindDevice, modifier = Modifier.size(36.dp)) {
-                    Icon(
-                        Icons.Filled.Vibration,
-                        "Find Device",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
+                    Icon(Icons.Default.Vibration, "Find Device",
+                        tint = MaterialTheme.colorScheme.primary)
                 }
                 IconButton(onClick = onDisconnect, modifier = Modifier.size(36.dp)) {
-                    Icon(
-                        Icons.Filled.BluetoothDisabled,
-                        "Disconnect",
-                        tint = MaterialTheme.colorScheme.error
-                    )
+                    Icon(Icons.Filled.BluetoothDisabled, "Disconnect",
+                        tint = MaterialTheme.colorScheme.error)
                 }
             }
         }
@@ -281,7 +275,7 @@ fun StepsCard(steps: Int, goal: Int, calories: Int, distanceMeters: Float) {
     ) {
         Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(Icons.AutoMirrored.Filled.DirectionsWalk, "Steps", tint = StepGreen, modifier = Modifier.size(20.dp))
+                Icon(Icons.Filled.DirectionsWalk, "Steps", tint = StepGreen, modifier = Modifier.size(20.dp))
                 Text("Steps", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
                 Text("$steps / $goal", style = MaterialTheme.typography.bodyMedium,
@@ -331,7 +325,7 @@ fun HeartRateSparklineCard(readings: List<Int>) {
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(Icons.AutoMirrored.Filled.ShowChart, "HR Chart", tint = HeartRed, modifier = Modifier.size(18.dp))
+                Icon(Icons.Filled.ShowChart, "HR Chart", tint = HeartRed, modifier = Modifier.size(18.dp))
                 Text("Recent Heart Rate", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.weight(1f))
                 Text("${readings.last()} bpm", style = MaterialTheme.typography.bodyMedium,
@@ -346,7 +340,7 @@ fun HeartRateSparklineCard(readings: List<Int>) {
                 val points = readings.mapIndexed { i, v ->
                     androidx.compose.ui.geometry.Offset(
                         x = i * stepX,
-                        y = size.height - (((v - min) / range) * size.height)
+                        y = size.height - ((v - min) / range) * size.height
                     )
                 }
                 // Draw line segments
@@ -377,7 +371,7 @@ fun BatteryIndicator(percent: Int?, charging: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         if (charging) Icon(Icons.Filled.BatteryChargingFull, "Charging", tint = BatteryAmber, modifier = Modifier.size(20.dp))
         val batteryIcon = when {
-            percent == null         -> Icons.AutoMirrored.Filled.BatteryUnknown
+            percent == null         -> Icons.Filled.BatteryUnknown
             percent > 80            -> Icons.Filled.BatteryFull
             percent > 50            -> Icons.Filled.Battery4Bar
             percent > 20            -> Icons.Filled.Battery2Bar

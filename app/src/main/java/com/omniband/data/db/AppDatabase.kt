@@ -13,7 +13,7 @@ import com.omniband.data.db.entity.*
         SleepSessionEntity::class,
         SleepStageEntity::class,
         SpO2Entity::class,
-        BatteryEntity::class,
+        BatteryEntity::class
     ],
     version = 1,
     exportSchema = true

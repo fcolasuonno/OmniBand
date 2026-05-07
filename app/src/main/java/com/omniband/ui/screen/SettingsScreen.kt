@@ -6,8 +6,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -40,7 +38,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
             .fillMaxSize()
             .verticalScroll(scroll)
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text("Settings", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
 
@@ -117,35 +115,24 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                 if (sleepAndroid) {
                     HorizontalDivider()
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(
-                            "When Sleep as Android is active:",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold,
-                        )
+                        Text("When Sleep as Android is active:", style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold)
                         BulletPoint("Continuous heart rate & SpO2 monitoring is enabled on the band")
                         BulletPoint("Alarm events trigger vibration on the band to wake you up")
                         BulletPoint("Accelerometer data is forwarded to Sleep as Android for actigraphy")
                         BulletPoint("Sony WF-1000XM5 switches to Noise Cancelling mode during sleep")
                     }
-                    val context = androidx.compose.ui.platform.LocalContext.current
                     OutlinedButton(
                         onClick = {
                             val intent = android.content.Intent().apply {
-                                setClassName(
-                                    "com.urbandroid.sleep",
-                                    "com.urbandroid.sleep.domain.wearable.WearablePickerActivity",
-                                )
-                            }
-                            try {
-                                context.startActivity(intent)
-                            } catch (_: Exception) {
-                                // Probably not installed
+                                setClassName("com.urbandroid.sleep",
+                                    "com.urbandroid.sleep.domain.wearable.WearablePickerActivity")
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(10.dp),
+                        shape = RoundedCornerShape(10.dp)
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.OpenInNew, "Open SaA", modifier = Modifier.size(16.dp))
+                        Icon(Icons.Filled.OpenInNew, "Open SaA", modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
                         Text("Open Sleep as Android")
                     }
@@ -160,7 +147,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Icon(Icons.AutoMirrored.Filled.DirectionsWalk, "Steps", tint = MaterialTheme.colorScheme.primary,
+                Icon(Icons.Filled.DirectionsWalk, "Steps", tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(20.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Daily Step Goal", style = MaterialTheme.typography.bodyLarge)
@@ -213,8 +200,8 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                         label = { Text("Auth Key") },
                         placeholder = { Text("00112233445566778899aabbccddeeff") },
                         singleLine = true,
-                        isError = (authKeyInput.isNotBlank()) && (authKeyInput.length != 32),
-                        supportingText = if ((authKeyInput.isNotBlank()) && (authKeyInput.length != 32)) {
+                        isError = authKeyInput.isNotBlank() && authKeyInput.length != 32,
+                        supportingText = if (authKeyInput.isNotBlank() && authKeyInput.length != 32) {
                             { Text("Must be 32 hex characters (16 bytes)") }
                         } else null
                     )

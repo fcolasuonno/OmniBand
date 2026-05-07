@@ -30,6 +30,9 @@ sealed class ConnectionState {
 val ConnectionState.isConnected: Boolean
     get() = this is ConnectionState.Connected
 
+val ConnectionState.isDisconnected: Boolean
+    get() = this is ConnectionState.Disconnected
+
 val ConnectionState.address: String?
     get() = when (this) {
         is ConnectionState.Connecting -> address
@@ -46,23 +49,29 @@ val ConnectionState.address: String?
 enum class DeviceType(
     val displayName: String,
     val namePattern: String,
-    val serviceUuid: String?,
+    val connectionMode: ConnectionMode
 ) {
     XIAOMI_SMART_BAND_7(
         displayName = "Xiaomi Smart Band 7",
         namePattern = "Xiaomi Smart Band 7",
-        serviceUuid = "0000fee0-0000-1000-8000-00805f9b34fb",
+        connectionMode = ConnectionMode.BLE
     ),
     SONY_WF1000XM5(
         displayName = "Sony WF-1000XM5",
         namePattern = "WF-1000XM5",
-        serviceUuid = "75c27625-bd42-d645-0b00-a4acd5dfb3b4",
+        connectionMode = ConnectionMode.BLE_AND_CLASSIC
     );
 
     companion object {
         fun fromDeviceName(name: String?): DeviceType? =
             name?.let { n -> entries.firstOrNull { n.contains(it.namePattern, ignoreCase = true) } }
     }
+}
+
+enum class ConnectionMode {
+    BLE,
+    CLASSIC,
+    BLE_AND_CLASSIC
 }
 
 // ---------------------------------------------------------------------------

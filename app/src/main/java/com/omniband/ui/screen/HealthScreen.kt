@@ -2,14 +2,12 @@ package com.omniband.ui.screen
 
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.DirectionsRun
-import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
-import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -18,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -41,12 +40,12 @@ fun HealthScreen(viewModel: HealthViewModel = hiltViewModel()) {
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Tab bar
-        SecondaryTabRow(selectedTabIndex = selectedTab) {
+        TabRow(selectedTabIndex = selectedTab) {
             tabs.forEachIndexed { i, title ->
                 Tab(
                     selected = selectedTab == i,
                     onClick = { selectedTab = i },
-                    text = { Text(title, style = MaterialTheme.typography.labelMedium) },
+                    text = { Text(title, style = MaterialTheme.typography.labelMedium) }
                 )
             }
         }
@@ -75,7 +74,7 @@ fun HeartRateTab(readings: List<HeartRateEntity>) {
         item {
             // Stats summary
             if (readings.isNotEmpty()) {
-                val avg = readings.asSequence().map { it.bpm }.average().toInt()
+                val avg = readings.map { it.bpm }.average().toInt()
                 val max = readings.maxOf { it.bpm }
                 val min = readings.minOf { it.bpm }
 
@@ -88,11 +87,11 @@ fun HeartRateTab(readings: List<HeartRateEntity>) {
                         modifier = Modifier.fillMaxWidth().padding(20.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
-                        HrStatBox("Avg", avg.toString(), "bpm", HeartRed)
+                        HrStatBox("Avg", "$avg", "bpm", HeartRed)
                         VerticalDivider(modifier = Modifier.height(48.dp))
-                        HrStatBox("Max", max.toString(), "bpm", MaterialTheme.colorScheme.error)
+                        HrStatBox("Max", "$max", "bpm", MaterialTheme.colorScheme.error)
                         VerticalDivider(modifier = Modifier.height(48.dp))
-                        HrStatBox("Min", min.toString(), "bpm", Color(0xFF2196F3))
+                        HrStatBox("Min", "$min", "bpm", Color(0xFF2196F3))
                     }
                 }
             }
@@ -148,7 +147,7 @@ fun HeartRateLineChart(readings: List<HeartRateEntity>) {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Icon(Icons.AutoMirrored.Filled.ShowChart, "HR Chart", tint = HeartRed, modifier = Modifier.size(16.dp))
+                Icon(Icons.Filled.ShowChart, "HR Chart", tint = HeartRed, modifier = Modifier.size(16.dp))
                 Text("Heart Rate (last ${readings.size} readings)", style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
             }
@@ -157,7 +156,7 @@ fun HeartRateLineChart(readings: List<HeartRateEntity>) {
                 val stepX = size.width / (readings.size - 1).coerceAtLeast(1)
                 val drawnCount = (readings.size * animProgress).toInt().coerceAtLeast(1)
                 val points = readings.take(drawnCount).mapIndexed { i, v ->
-                    Offset(i * stepX, size.height - (((v.bpm - minBpm) / range) * size.height))
+                    Offset(i * stepX, size.height - ((v.bpm - minBpm) / range) * size.height)
                 }
                 // Fill path
                 if (points.size > 1) {
@@ -223,7 +222,7 @@ fun HrReadingRow(entity: HeartRateEntity, timeFormat: SimpleDateFormat) {
 fun StepsTab(stepsList: List<StepsEntity>) {
     if (stepsList.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            EmptyState(Icons.AutoMirrored.Filled.DirectionsWalk, "No steps data yet.")
+            EmptyState(Icons.Filled.DirectionsWalk, "No steps data yet.")
         }
         return
     }
@@ -247,7 +246,7 @@ fun StepsTab(stepsList: List<StepsEntity>) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.DirectionsRun, "Steps", tint = StepGreen, modifier = Modifier.size(36.dp))
+                        Icon(Icons.Filled.DirectionsRun, "Steps", tint = StepGreen, modifier = Modifier.size(36.dp))
                         Column {
                             Text("Today", style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))

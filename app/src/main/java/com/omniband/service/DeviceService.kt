@@ -5,8 +5,7 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ServiceInfo
-import android.os.Build
+import android.content.IntentFilter
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
@@ -54,8 +53,6 @@ class DeviceService : LifecycleService() {
         getSystemService(NotificationManager::class.java)
     }
 
-    private var isServiceForeground = false
-
     companion object {
         const val NOTIFICATION_ID = 1001
         const val ACTION_DISCONNECT = "com.omniband.action.DISCONNECT"
@@ -66,6 +63,11 @@ class DeviceService : LifecycleService() {
             Intent(context, DeviceService::class.java).also { intent ->
                 intent.action = ACTION_CONNECT
             }
+
+        fun stopIntent(context: Context) =
+            Intent(context, DeviceService::class.java).also { intent ->
+                intent.action = ACTION_DISCONNECT
+            }
     }
 
     // -------------------------------------------------------------------------
@@ -75,39 +77,14 @@ class DeviceService : LifecycleService() {
     override fun onCreate() {
         super.onCreate()
         Timber.i("DeviceService: created")
-        
-        val notification = buildNotification("Connecting…")
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
-            isServiceForeground = true
-        } catch (e: Exception) {
-            Timber.e(e, "Failed to start foreground service")
-            if ((Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) && (e is android.app.ForegroundServiceStartNotAllowedException)) {
-                stopSelf()
-            }
-        }
-
-        if (isServiceForeground) {
-            observeConnectionState()
-            observeDeviceEvents()
-            autoConnectSavedDevice()
-        }
+        startForeground(NOTIFICATION_ID, buildNotification("Connecting…"))
+        observeConnectionState()
+        observeDeviceEvents()
+        autoConnectSavedDevice()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        if (!isServiceForeground && intent?.action != ACTION_DISCONNECT) {
-            return START_NOT_STICKY
-        }
-
         when (intent?.action) {
             ACTION_DISCONNECT -> {
                 bleManager.disconnect()

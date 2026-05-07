@@ -81,7 +81,7 @@ fun OmniBandApp() {
             startDestination = Screen.Dashboard.route,
             modifier = Modifier.padding(padding)
         ) {
-            composable(Screen.Dashboard.route) { DashboardScreen() }
+            composable(Screen.Dashboard.route) { DashboardScreen(navController) }
             composable(Screen.Health.route)    { HealthScreen() }
             composable(Screen.Devices.route)   { DeviceScanScreen(navController) }
             composable(Screen.Settings.route)  { SettingsScreen() }

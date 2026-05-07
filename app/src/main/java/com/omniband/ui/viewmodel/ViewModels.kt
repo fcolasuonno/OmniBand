@@ -4,7 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.omniband.ble.BleManager
 import com.omniband.ble.ConnectionState
+import com.omniband.ble.DeviceType
 import com.omniband.ble.ScannedDevice
+import com.omniband.ble.isConnected
 import com.omniband.ble.protocol.ANCMode
 import com.omniband.ble.protocol.DeviceEvent
 import com.omniband.data.db.entity.*
@@ -31,7 +33,7 @@ class DashboardViewModel @Inject constructor(
     private val bleManager: BleManager,
     private val healthRepository: HealthRepository,
     private val deviceRepository: DeviceRepository,
-    private val prefs: UserPreferencesRepository,
+    private val prefs: UserPreferencesRepository
 ) : ViewModel() {
 
     val connectionState: StateFlow<ConnectionState> = bleManager.connectionState
@@ -105,6 +107,10 @@ class DashboardViewModel @Inject constructor(
         viewModelScope.launch { bleManager.vibrate() }
     }
 
+    fun syncTime() {
+        viewModelScope.launch { bleManager.syncTime() }
+    }
+
     fun disconnect() = bleManager.disconnect()
 }
 
@@ -131,7 +137,7 @@ class ScanViewModel @Inject constructor(
             deviceRepository.addDevice(device.address, device.name ?: "Unknown Device", type, authKey)
             deviceRepository.setActiveDevice(device.address)
             prefs.saveActiveDevice(device.address, type.name)
-            authKey?.let { prefs.saveAuthKey(it) }
+            if (authKey != null) prefs.saveAuthKey(authKey)
 
             bleManager.connect(device.address, type, authKey)
         }
@@ -180,6 +186,7 @@ class HealthViewModel @Inject constructor(
 class SettingsViewModel @Inject constructor(
     private val prefs: UserPreferencesRepository,
     private val deviceRepository: DeviceRepository,
+    private val bleManager: BleManager
 ) : ViewModel() {
 
     val autoReconnect: StateFlow<Boolean> = prefs.autoReconnect

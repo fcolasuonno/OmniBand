@@ -30,7 +30,7 @@ private val DarkColorScheme = darkColorScheme(
     onPrimary     = Color(0xFF003060),
     onSecondary   = Color(0xFF1E0A6E),
     onBackground  = Color(0xFFE6E1F5),
-    onSurface     = Color(0xFFE6E1F5),
+    onSurface     = Color(0xFFE6E1F5)
 )
 
 private val LightColorScheme = lightColorScheme(
@@ -53,11 +53,9 @@ fun OmniBandTheme(
 ) {
     val context = LocalContext.current
     val colorScheme = when {
-        dynamicColor && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S -> {
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColorScheme
-        else      -> LightColorScheme
+        dynamicColor -> if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        darkTheme    -> DarkColorScheme
+        else         -> LightColorScheme
     }
 
     MaterialTheme(

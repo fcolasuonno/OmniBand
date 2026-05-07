@@ -11,7 +11,7 @@ data class DeviceEntity(
     val authKey: String? = null,
     val addedAt: Long = System.currentTimeMillis(),
     val lastConnectedAt: Long? = null,
-    val isActive: Boolean = true,
+    val isActive: Boolean = true
 )
 
 @Entity(tableName = "heart_rate")

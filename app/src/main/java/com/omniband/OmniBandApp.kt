@@ -4,7 +4,6 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
-import com.omniband.BuildConfig
 import dagger.hilt.android.HiltAndroidApp
 import timber.log.Timber
 
