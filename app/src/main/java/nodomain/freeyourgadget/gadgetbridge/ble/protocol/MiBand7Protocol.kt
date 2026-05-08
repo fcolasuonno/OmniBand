@@ -80,6 +80,8 @@ class MiBand7Protocol(
 
     @Volatile private var authContinuation: Continuation<Boolean>? = null
     @Volatile private var pendingEncKey:    ByteArray?              = null
+    @Volatile
+    private var pendingEncSeq: Int = 0
     @Volatile private var privateEC:        ByteArray?              = null
 
     // Effective auth key (provided or default)
@@ -214,7 +216,10 @@ class MiBand7Protocol(
                     val remoteRandom = payload.copyOfRange(3, 19)
                     val remotePub = payload.copyOfRange(19, 67)
                     val shared = ECDH_B163.generateShared(privateEC!!, remotePub) ?: throw Exception("ECDH failed")
-                    
+
+                    // Initial encrypted sequence number is read from the first 4 bytes of shared secret
+                    pendingEncSeq = ByteBuffer.wrap(shared).order(ByteOrder.LITTLE_ENDIAN).int
+
                     // Derive session key: shared[8..23] XOR authKey
                     val sessionKey = ByteArray(16)
                     val keyToUse = effectiveAuthKey
@@ -241,6 +246,7 @@ class MiBand7Protocol(
                     Timber.i("MiBand7: auth SUCCESS ✓")
                     isAuthenticated = true
                     decoder.sessionKey = pendingEncKey
+                    encryptedSeq = pendingEncSeq
                     scope.launch {
                         _events.emit(DeviceEvent.DeviceReady)
                         delay(200); syncTime(gatt)
@@ -248,7 +254,12 @@ class MiBand7Protocol(
                         delay(200); writeChunked(
                         gatt,
                         Huami2021Chunked.ENDPOINT_STEPS,
-                        byteArrayOf(0x05, 0x01)
+                        byteArrayOf(0x03) // Request current steps
+                    )
+                        delay(200); writeChunked(
+                        gatt,
+                        Huami2021Chunked.ENDPOINT_STEPS,
+                        byteArrayOf(0x05, 0x01) // Enable realtime updates
                     )
                     }
                 } else {
@@ -297,16 +308,31 @@ class MiBand7Protocol(
     }
 
     private fun parseActivity(p: ByteArray) {
-        // ZeppOS realtime steps: [0x07] [status] [steps:4] [dist:4] [cal:4] = 14 bytes
-        if (p.size < 14) return
+        if (p.isEmpty()) return
 
-        val buf = ByteBuffer.wrap(p, 2, 12).order(ByteOrder.LITTLE_ENDIAN)
-        val steps = buf.int
-        val dist = buf.int
-        val cal = buf.int
+        when (p[0].toInt()) {
+            0x07 -> { // Realtime notification
+                // Format: [0x07] [status] [steps:4] [dist:4] [cal:4] = 14 bytes
+                if (p.size < 14) return
+                val buf = ByteBuffer.wrap(p, 2, 12).order(ByteOrder.LITTLE_ENDIAN)
+                val steps = buf.int
+                val dist = buf.int
+                val cal = buf.int
+                Timber.d("MiBand7: activity notification -> steps=$steps, dist=$dist, kcal=$cal")
+                scope.launch { _events.emit(DeviceEvent.Steps(steps, cal, dist.toFloat())) }
+            }
 
-        Timber.d("MiBand7: activity update -> steps=$steps, dist=$dist, kcal=$cal")
-        scope.launch { _events.emit(DeviceEvent.Steps(steps, cal, dist.toFloat())) }
+            0x04 -> { // Reply to GET command
+                // Format: [0x04] [status] [?] [steps:4] [dist:4] [cal:4] = 15 bytes
+                if (p.size < 15) return
+                val buf = ByteBuffer.wrap(p, 3, 12).order(ByteOrder.LITTLE_ENDIAN)
+                val steps = buf.int
+                val dist = buf.int
+                val cal = buf.int
+                Timber.d("MiBand7: activity reply -> steps=$steps, dist=$dist, kcal=$cal")
+                scope.launch { _events.emit(DeviceEvent.Steps(steps, cal, dist.toFloat())) }
+            }
+        }
     }
 
     private fun parseSpo2(p: ByteArray) {
@@ -399,7 +425,7 @@ class MiBand7Protocol(
         val char = chunkedWrite ?: return
 
         val key =
-            if (isAuthenticated && endpoint != Huami2021Chunked.ENDPOINT_AUTH) decoder.sessionKey else null
+            if (isAuthenticated && Huami2021Chunked.isEncrypted(endpoint)) decoder.sessionKey else null
         val packets = Huami2021Chunked.encode(
             handle = handleSeq++,
             endpoint = endpoint,

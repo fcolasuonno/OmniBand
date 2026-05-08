@@ -25,6 +25,36 @@ object Huami2021Chunked {
     const val ENDPOINT_ACTIVITY_FETCH: Short = 0x004b.toShort()
     const val ENDPOINT_SPO2         : Short = 0x0045.toShort()
     const val ENDPOINT_DEVICE_INFO: Short = 0x0043.toShort()
+    const val ENDPOINT_CONFIG: Short = 0x002d.toShort()
+    const val ENDPOINT_USER_INFO: Short = 0x0022.toShort()
+
+    fun isEncrypted(endpoint: Short): Boolean = when (endpoint) {
+        ENDPOINT_BATTERY,
+        ENDPOINT_ACTIVITY_FETCH,
+        ENDPOINT_CONFIG,
+        ENDPOINT_FIND_DEVICE,
+        ENDPOINT_USER_INFO,
+        0x0023.toShort(), // Workout
+        0x003e.toShort(), // Connection
+        0x0018.toShort(), // Notification
+        0x0031.toShort(), // Assistant 1
+        0x004c.toShort(), // Assistant 2
+        0x0042.toShort(), // Shortcut Cards
+        0x0019.toShort(), // Watchface
+        0x003c.toShort(), // Vibration Patterns
+        0x0040.toShort(), // Display Items
+        0x003f.toShort(), // Silent Mode
+        0x0041.toShort(), // World Clocks
+        0x0044.toShort(), // HTTP
+        0x0046.toShort(), // Contacts
+        0x0049.toShort(), // Voice Memos
+        0x004d.toShort(), // Maps
+        0x0033.toShort(), // WiFi
+        0x0034.toShort()  // FTP Server
+            -> true
+
+        else -> false
+    }
 
     // ── Auth constants ──────────────────────────────────────────────
     const val AUTH_CMD_PUB_KEY      : Byte = 0x04
