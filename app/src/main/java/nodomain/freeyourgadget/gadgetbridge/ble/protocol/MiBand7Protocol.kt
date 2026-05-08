@@ -41,14 +41,12 @@ class MiBand7Protocol(
 ) : DeviceProtocol {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val _events = MutableSharedFlow<DeviceEvent>(extraBufferCapacity = 64)
+    private val _events = MutableSharedFlow<DeviceEvent>(replay = 1, extraBufferCapacity = 64)
     override val events: Flow<DeviceEvent> = _events.asSharedFlow()
 
     companion object {
         val UUID_CHAR_CHUNKED_WRITE: UUID  = UUID.fromString("00000016-0000-3512-2118-0009af100700")
         val UUID_CHAR_CHUNKED_READ: UUID   = UUID.fromString("00000017-0000-3512-2118-0009af100700")
-        val UUID_CHAR_RAW_CONTROL: UUID = UUID.fromString("00000001-0000-3512-2118-0009af100700")
-        val UUID_CHAR_RAW_DATA: UUID = UUID.fromString("00000002-0000-3512-2118-0009af100700")
         val UUID_SERVICE_HR: UUID          = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
         val UUID_CHAR_HR_MEASUREMENT: UUID = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb")
         val UUID_CCCD: UUID                = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -64,8 +62,6 @@ class MiBand7Protocol(
 
     private var chunkedWrite: BluetoothGattCharacteristic? = null
     private var chunkedRead:  BluetoothGattCharacteristic? = null
-    private var rawControl: BluetoothGattCharacteristic? = null
-    private var rawData: BluetoothGattCharacteristic? = null
     private var hrChar:       BluetoothGattCharacteristic? = null
 
     private val decoder = Huami2021Chunked.Decoder()
@@ -101,8 +97,6 @@ class MiBand7Protocol(
         for (svc in gatt.services) {
             if (chunkedWrite == null) chunkedWrite = svc.getCharacteristic(UUID_CHAR_CHUNKED_WRITE)
             if (chunkedRead  == null) chunkedRead  = svc.getCharacteristic(UUID_CHAR_CHUNKED_READ)
-            if (rawControl == null) rawControl = svc.getCharacteristic(UUID_CHAR_RAW_CONTROL)
-            if (rawData == null) rawData = svc.getCharacteristic(UUID_CHAR_RAW_DATA)
         }
         hrChar = gatt.getService(UUID_SERVICE_HR)?.getCharacteristic(UUID_CHAR_HR_MEASUREMENT)
 
@@ -116,10 +110,6 @@ class MiBand7Protocol(
         // Subscribe to chunked notifications
         if (!enableNotification(gatt, chunkedRead!!)) return false
         awaitDescriptorWrite()
-
-        rawData?.let {
-            if (enableNotification(gatt, it)) awaitDescriptorWrite()
-        }
 
         hrChar?.let {
             if (enableNotification(gatt, it)) awaitDescriptorWrite()
@@ -179,10 +169,6 @@ class MiBand7Protocol(
                     dispatch(gatt, msg.endpoint, msg.payload)
                 }
             }
-            true
-        }
-        UUID_CHAR_RAW_DATA -> {
-            handleRawSensorData(value)
             true
         }
         UUID_CHAR_HR_MEASUREMENT -> { parseStdHr(value); true }
@@ -390,13 +376,11 @@ class MiBand7Protocol(
     override suspend fun onSleepTrackingStarted(gatt: BluetoothGatt) {
         setHeartRateMonitoring(gatt, continuous = true)
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_SPO2, byteArrayOf(0x01, 0x01))
-        setRawSensorEnabled(gatt, true)
     }
 
     override suspend fun onSleepTrackingStopped(gatt: BluetoothGatt) {
         setHeartRateMonitoring(gatt, continuous = false)
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_SPO2, byteArrayOf(0x01, 0x00))
-        setRawSensorEnabled(gatt, false)
     }
 
     override suspend fun triggerAlarm(gatt: BluetoothGatt) =
@@ -405,43 +389,11 @@ class MiBand7Protocol(
     override suspend fun dismissAlarm(gatt: BluetoothGatt) =
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x00))
 
-    // ── BLE Write Helpers ─────────────────────────────────────────────
-
     override suspend fun setRawSensorEnabled(gatt: BluetoothGatt, enabled: Boolean) {
-        val char = rawControl ?: return
-        if (enabled) {
-            writeRaw(gatt, char, byteArrayOf(0x01, 0x03, 0x19))
-            writeRaw(gatt, char, byteArrayOf(0x01, 0x03, 0x00, 0x00, 0x00, 0x19))
-            writeRaw(gatt, char, byteArrayOf(0x02))
-        } else {
-            writeRaw(gatt, char, byteArrayOf(0x03))
-        }
+        // Not implemented for Mi Band 7 (ZeppOS)
     }
 
-    private fun handleRawSensorData(value: ByteArray) {
-        if (value.size < 2) return
-        val type = value[0].toInt() and 0xFF
-
-        if (type == 0x00) {
-            // g-sensor x y z values
-            if ((value.size - 2) % 6 != 0) return
-
-            val scaleFactor = 4100f
-            val gravity = 9.81f
-
-            for (i in 2 until value.size step 6) {
-                val xRaw = ByteBuffer.wrap(value, i, 2).order(ByteOrder.LITTLE_ENDIAN).short
-                val yRaw = ByteBuffer.wrap(value, i + 2, 2).order(ByteOrder.LITTLE_ENDIAN).short
-                val zRaw = ByteBuffer.wrap(value, i + 4, 2).order(ByteOrder.LITTLE_ENDIAN).short
-
-                val x = (xRaw * gravity) / scaleFactor
-                val y = (yRaw * gravity) / scaleFactor
-                val z = (zRaw * gravity) / scaleFactor
-
-                scope.launch { _events.emit(DeviceEvent.RawAccelerometer(x, y, z)) }
-            }
-        }
-    }
+    // ── BLE Write Helpers ─────────────────────────────────────────────
 
     private fun writeChunked(gatt: BluetoothGatt, endpoint: Short, payload: ByteArray) {
         val char = chunkedWrite ?: return
@@ -476,7 +428,10 @@ class MiBand7Protocol(
                         else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(char, data, writeType)
+            val status = gatt.writeCharacteristic(char, data, writeType)
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Timber.e("MiBand7: writeCharacteristic failed status=$status")
+            }
         } else {
             @Suppress("DEPRECATION")
             char.value = data

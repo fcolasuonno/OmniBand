@@ -103,10 +103,11 @@ object Huami2021Chunked {
         var offset = 0
         var count: Byte = 0
         var headerSize = 11
+        val effectiveMtu = mtu - 3 // ATT header is 3 bytes
 
         while (offset < dataToSend.size) {
             val isFirst = (offset == 0)
-            val chunkSize = minOf(dataToSend.size - offset, mtu - headerSize)
+            val chunkSize = minOf(dataToSend.size - offset, effectiveMtu - headerSize)
             val isLast = (offset + chunkSize >= dataToSend.size)
 
             // Flags: 0x01=First, 0x02=Last, 0x04=NeedsAck, 0x08=Encrypted

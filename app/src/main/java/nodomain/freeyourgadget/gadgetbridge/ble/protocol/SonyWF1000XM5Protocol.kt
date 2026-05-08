@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothStatusCodes
 import android.os.Build
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CoroutineScope
@@ -56,7 +57,7 @@ import kotlin.coroutines.resume
 class SonyWF1000XM5Protocol : DeviceProtocol {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val _events = MutableSharedFlow<DeviceEvent>(extraBufferCapacity = 64)
+    private val _events = MutableSharedFlow<DeviceEvent>(replay = 1, extraBufferCapacity = 64)
     override val events: Flow<DeviceEvent> = _events.asSharedFlow()
 
     companion object {
@@ -102,6 +103,8 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
     ): Boolean {
         Timber.i("SonyWF1000XM5: initializing ${gatt.device.address}")
 
+        delay(300) // Let the GATT stack settle after service discovery
+
         txCharacteristic = gatt.getService(UUID_SERVICE_SONY)?.getCharacteristic(UUID_CHAR_TX)
         rxCharacteristic = gatt.getService(UUID_SERVICE_SONY)?.getCharacteristic(UUID_CHAR_RX)
 
@@ -110,8 +113,9 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
             val batteryChar = gatt.getService(UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb"))
                 ?.getCharacteristic(UUID_CHAR_BATTERY)
             if (batteryChar != null) {
-                enableNotification(gatt, batteryChar)
-                awaitDescriptorWrite()   // FIX 3: wait before returning
+                if (enableNotification(gatt, batteryChar)) {
+                    awaitDescriptorWrite()   // FIX 3: wait before returning
+                }
                 _events.emit(DeviceEvent.DeviceReady)
                 return true
             }
@@ -119,8 +123,9 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
         }
 
         // Enable RX notifications and wait for the CCCD write to complete
-        enableNotification(gatt, rxCharacteristic!!)
-        awaitDescriptorWrite()   // FIX 3: replaces unreliable delay(200)
+        if (enableNotification(gatt, rxCharacteristic!!)) {
+            awaitDescriptorWrite()   // FIX 3: replaces unreliable delay(200)
+        }
 
         // Send Sony initialization handshake with timeout
         return try {
@@ -137,7 +142,7 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
         return suspendCancellableCoroutine { cont ->
             initContinuation = cont
             // Sony init packet: [0x3E][0x00][seqId][0x00][0x00][checksum]
-            val initPacket = buildPacket(DATA_TYPE_INIT, byteArrayOf(0x00, 0x00))
+            val initPacket = buildPacket(DATA_TYPE_INIT, byteArrayOf())
             val wrote = gatt.safeWriteCharacteristic(txCharacteristic!!, initPacket)
             if (!wrote) {
                 Timber.e("SonyWF1000XM5: failed to send init packet")
@@ -179,8 +184,8 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
         }
 
         val dataType = data[1]
-        // payload starts at byte 4 (after start, type, seq, len*2)
-        val payloadStart = 4
+        // payload starts at byte 5 (after start, type, seq, lenHigh, lenLow)
+        val payloadStart = 5
         val payload = if (data.size > payloadStart) data.copyOfRange(payloadStart, data.size - 1) else byteArrayOf()
 
         when (dataType) {
@@ -261,6 +266,11 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
         Timber.d("SonyWF1000XM5: HR monitoring not supported on this device")
     }
 
+    override suspend fun setRawSensorEnabled(gatt: BluetoothGatt, enabled: Boolean) {
+        // WF-1000XM5 does not support raw sensor streaming
+        Timber.d("SonyWF1000XM5: raw sensor streaming not supported on this device")
+    }
+
     override suspend fun syncTime(gatt: BluetoothGatt) {
         // Not required for earbuds
         Timber.d("SonyWF1000XM5: time sync not needed")
@@ -336,18 +346,24 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
         return packet
     }
 
-    private fun enableNotification(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-        gatt.setCharacteristicNotification(characteristic, true)
-        characteristic.getDescriptor(UUID_CCCD)?.let { descriptor ->
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-            } else {
-                @Suppress("DEPRECATION")
-                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                @Suppress("DEPRECATION")
-                gatt.writeDescriptor(descriptor)
-            }
-        } ?: Timber.w("SonyWF1000XM5: CCCD descriptor not found on ${characteristic.uuid}")
+    private fun enableNotification(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic
+    ): Boolean {
+        if (!gatt.setCharacteristicNotification(characteristic, true)) return false
+        val descriptor = characteristic.getDescriptor(UUID_CCCD) ?: return false
+
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeDescriptor(
+                descriptor,
+                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            ) == BluetoothStatusCodes.SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            @Suppress("DEPRECATION")
+            gatt.writeDescriptor(descriptor)
+        }
     }
 
     override fun destroy() {
