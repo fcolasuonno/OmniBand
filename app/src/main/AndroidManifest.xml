@@ -31,6 +31,10 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <uses-feature android:name="android.hardware.bluetooth" android:required="true" />
 
+    <queries>
+        <package android:name="com.urbandroid.sleep" />
+    </queries>
+
     <application
         android:name=".OmniBandApp"
         android:allowBackup="true"

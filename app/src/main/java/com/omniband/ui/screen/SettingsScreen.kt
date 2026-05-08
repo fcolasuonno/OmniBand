@@ -1,17 +1,55 @@
 package com.omniband.ui.screen
 
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.Autorenew
+import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.DirectionsWalk
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FitnessCenter
+import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Watch
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -26,6 +64,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
     val sleepAndroid        by viewModel.sleepAsAndroidEnabled.collectAsStateWithLifecycle()
     val stepGoal            by viewModel.dailyStepGoal.collectAsStateWithLifecycle()
     val savedDevices        by viewModel.savedDevices.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     var stepGoalInput by remember(stepGoal) { mutableStateOf(stepGoal.toString()) }
     var showAuthDialog by remember { mutableStateOf(false) }
@@ -124,9 +163,32 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                     }
                     OutlinedButton(
                         onClick = {
-                            val intent = android.content.Intent().apply {
-                                setClassName("com.urbandroid.sleep",
-                                    "com.urbandroid.sleep.domain.wearable.WearablePickerActivity")
+                            val activities = listOf(
+                                "com.urbandroid.sleep.wearable.WearablePickerActivity",
+                                "com.urbandroid.sleep.domain.wearable.WearablePickerActivity",
+                                "com.urbandroid.sleep.settings.WearablePickerActivity"
+                            )
+                            var success = false
+                            for (activity in activities) {
+                                try {
+                                    val intent = android.content.Intent().apply {
+                                        setClassName("com.urbandroid.sleep", activity)
+                                    }
+                                    context.startActivity(intent)
+                                    success = true
+                                    break
+                                } catch (e: Exception) {
+                                    continue
+                                }
+                            }
+                            if (!success) {
+                                try {
+                                    val launchIntent =
+                                        context.packageManager.getLaunchIntentForPackage("com.urbandroid.sleep")
+                                    if (launchIntent != null) context.startActivity(launchIntent)
+                                } catch (e: Exception) {
+                                    // Sleep as Android not installed
+                                }
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),

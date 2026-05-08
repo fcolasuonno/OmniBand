@@ -21,6 +21,8 @@ import timber.log.Timber
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
+import java.time.Instant
+import java.time.ZoneId
 import java.util.Calendar
 import java.util.UUID
 import javax.crypto.Cipher
@@ -64,6 +66,7 @@ class MiBand7Protocol(
 
     private val decoder = Huami2021Chunked.Decoder()
     private var handleSeq: Byte = 0
+    private var encryptedSeq: Int = 0
 
     var negotiatedMtu: Int = 23
         private set
@@ -160,9 +163,11 @@ class MiBand7Protocol(
         value: ByteArray,
     ): Boolean = when (characteristic.uuid) {
         UUID_CHAR_CHUNKED_READ -> {
-            decoder.decode(value)?.let { msg ->
-                if (msg.needsAck) sendAck(gatt, msg.handle, msg.count)
-                dispatch(gatt, msg.endpoint, msg.payload)
+            decoder.decode(value)?.let { result ->
+                if (result.needsAck) sendAck(gatt, result.handle, result.count)
+                result.message?.let { msg ->
+                    dispatch(gatt, msg.endpoint, msg.payload)
+                }
             }
             true
         }
@@ -173,17 +178,22 @@ class MiBand7Protocol(
     private fun sendAck(gatt: BluetoothGatt, handle: Byte, count: Byte) {
         // Ack format: [0x04][0x00][handle][0x01][count]
         val ack = byteArrayOf(0x04, 0x00, handle, 0x01, count)
-        writeRaw(gatt, chunkedRead, ack)
+        writeRaw(gatt, chunkedRead, ack, noResponse = true)
     }
 
     private fun dispatch(gatt: BluetoothGatt, endpoint: Short, payload: ByteArray) {
         when (endpoint) {
             Huami2021Chunked.ENDPOINT_AUTH      -> handleAuth(gatt, payload)
-            Huami2021Chunked.ENDPOINT_HEARTRATE -> parseChunkedHr(payload)
+            Huami2021Chunked.ENDPOINT_HEARTRATE -> {
+                if (payload.isNotEmpty() && payload[0] == 0x06.toByte()) {
+                    parseSleep(payload)
+                } else {
+                    parseChunkedHr(payload)
+                }
+            }
             Huami2021Chunked.ENDPOINT_BATTERY   -> parseBattery(payload)
-            Huami2021Chunked.ENDPOINT_ACTIVITY  -> parseActivity(payload)
+            Huami2021Chunked.ENDPOINT_STEPS -> parseActivity(payload)
             Huami2021Chunked.ENDPOINT_SPO2      -> parseSpo2(payload)
-            Huami2021Chunked.ENDPOINT_SLEEP     -> parseSleep(payload)
         }
     }
 
@@ -230,10 +240,16 @@ class MiBand7Protocol(
                 if (ok) {
                     Timber.i("MiBand7: auth SUCCESS ✓")
                     isAuthenticated = true
+                    decoder.sessionKey = pendingEncKey
                     scope.launch {
                         _events.emit(DeviceEvent.DeviceReady)
                         delay(200); syncTime(gatt)
                         delay(200); requestBattery(gatt)
+                        delay(200); writeChunked(
+                        gatt,
+                        Huami2021Chunked.ENDPOINT_STEPS,
+                        byteArrayOf(0x05, 0x01)
+                    )
                     }
                 } else {
                     val code = if (payload.size >= 3) payload[2].toUByte().toString(16) else "?"
@@ -273,18 +289,23 @@ class MiBand7Protocol(
     }
 
     private fun parseBattery(p: ByteArray) {
-        if (p.size < 2) return
-        val level = p[1].toInt() and 0xFF
-        val charging = p.size >= 3 && p[2].toInt() == 1
+        if (p.size < 3) return
+        // ZeppOS battery reply: [0x04][?] [level] [status] ...
+        val level = p[2].toInt() and 0xFF
+        val charging = p.size >= 4 && p[3].toInt() == 1
         scope.launch { _events.emit(DeviceEvent.Battery(level, charging)) }
     }
 
     private fun parseActivity(p: ByteArray) {
-        if (p.size < 10) return
-        val buf = ByteBuffer.wrap(p, 2, p.size - 2).order(ByteOrder.LITTLE_ENDIAN)
+        // ZeppOS realtime steps: [0x07] [status] [steps:4] [dist:4] [cal:4] = 14 bytes
+        if (p.size < 14) return
+
+        val buf = ByteBuffer.wrap(p, 2, 12).order(ByteOrder.LITTLE_ENDIAN)
         val steps = buf.int
-        val dist = buf.short.toInt() and 0xFFFF
-        val cal = buf.short.toInt() and 0xFFFF
+        val dist = buf.int
+        val cal = buf.int
+
+        Timber.d("MiBand7: activity update -> steps=$steps, dist=$dist, kcal=$cal")
         scope.launch { _events.emit(DeviceEvent.Steps(steps, cal, dist.toFloat())) }
     }
 
@@ -295,10 +316,11 @@ class MiBand7Protocol(
     }
 
     private fun parseSleep(p: ByteArray) {
-        if (p.isEmpty()) return
-        val stage = when (p[0].toInt() and 0xFF) {
-            0x00 -> SleepStage.AWAKE; 0x01 -> SleepStage.LIGHT
-            0x02 -> SleepStage.DEEP;  0x03 -> SleepStage.REM
+        if (p.size < 2) return
+        // ZeppOS sleep event: [0x06] [0x01=Asleep, 0x00=Awake]
+        val stage = when (p[1].toInt() and 0xFF) {
+            0x01 -> SleepStage.DEEP // Simplified
+            0x00 -> SleepStage.AWAKE
             else -> null
         } ?: return
         scope.launch { _events.emit(DeviceEvent.SleepData(stage)) }
@@ -307,37 +329,48 @@ class MiBand7Protocol(
     // ── Commands ──────────────────────────────────────────────────────
 
     override suspend fun vibrate(gatt: BluetoothGatt, pattern: VibratePattern) {
-        writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x01))
+        // ZeppOS Find Band: START=0x03, STOP=0x06
+        writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x03))
         if (pattern == VibratePattern.SHORT || pattern == VibratePattern.DOUBLE) {
             delay(600)
-            writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x00))
+            writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x06))
         }
     }
 
     override suspend fun setHeartRateMonitoring(gatt: BluetoothGatt, continuous: Boolean) {
-        val p = if (continuous) byteArrayOf(0x01, 0x00, 0x01) else byteArrayOf(0x01, 0x00, 0x00)
-        writeChunked(gatt, Huami2021Chunked.ENDPOINT_HEARTRATE, p)
+        // ZeppOS HR: SET=0x04, START=0x01, STOP=0x00
+        val mode = if (continuous) 0x01.toByte() else 0x00.toByte()
+        writeChunked(gatt, Huami2021Chunked.ENDPOINT_HEARTRATE, byteArrayOf(0x04, mode))
     }
 
     override suspend fun syncTime(gatt: BluetoothGatt) {
-        val c = Calendar.getInstance()
-        val tz = (c.timeZone.rawOffset / 60_000 / 15).toByte()
-        val p = ByteBuffer.allocate(9).order(ByteOrder.LITTLE_ENDIAN).run {
-            put(0x01.toByte())
-            putShort(c[Calendar.YEAR].toShort())
-            put((c[Calendar.MONTH] + 1).toByte())
-            put(c[Calendar.DAY_OF_MONTH].toByte())
-            put(c[Calendar.HOUR_OF_DAY].toByte())
-            put(c[Calendar.MINUTE].toByte())
-            put(c[Calendar.SECOND].toByte())
-            put(tz)
-            array()
-        }
-        writeChunked(gatt, Huami2021Chunked.ENDPOINT_SET_TIME, p)
+        val timestamp = Calendar.getInstance()
+        val zoneId = ZoneId.systemDefault()
+        val rules = zoneId.rules
+
+        val p = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN).apply {
+            put(0x05.toByte()) // CMD_SET_TIME
+            putShort(timestamp.get(Calendar.YEAR).toShort())
+            put((timestamp.get(Calendar.MONTH) + 1).toByte())
+            put(timestamp.get(Calendar.DATE).toByte())
+            put(timestamp.get(Calendar.HOUR_OF_DAY).toByte())
+            put(timestamp.get(Calendar.MINUTE).toByte())
+            put(timestamp.get(Calendar.SECOND).toByte())
+            put((timestamp.get(Calendar.DAY_OF_WEEK) - 1).toByte())
+            put((timestamp.get(Calendar.MILLISECOND) / 1000.0 * 256.0).toInt().toByte())
+            if (rules.isDaylightSavings(Instant.now())) {
+                put(0x08.toByte())
+            } else {
+                put(0x00.toByte())
+            }
+            put((rules.getOffset(Instant.now()).totalSeconds / (60 * 15)).toByte())
+        }.array()
+        writeChunked(gatt, Huami2021Chunked.ENDPOINT_TIME, p)
     }
 
     override suspend fun requestBattery(gatt: BluetoothGatt) {
-        writeChunked(gatt, Huami2021Chunked.ENDPOINT_BATTERY, byteArrayOf(0x01))
+        // ZeppOS Battery: REQUEST=0x03
+        writeChunked(gatt, Huami2021Chunked.ENDPOINT_BATTERY, byteArrayOf(0x03))
     }
 
     override suspend fun onSleepTrackingStarted(gatt: BluetoothGatt) {
@@ -360,9 +393,23 @@ class MiBand7Protocol(
 
     private fun writeChunked(gatt: BluetoothGatt, endpoint: Short, payload: ByteArray) {
         val char = chunkedWrite ?: return
-        val packets = Huami2021Chunked.encode(handleSeq++, endpoint, payload, negotiatedMtu)
+
+        val key =
+            if (isAuthenticated && endpoint != Huami2021Chunked.ENDPOINT_AUTH) decoder.sessionKey else null
+        val packets = Huami2021Chunked.encode(
+            handle = handleSeq++,
+            endpoint = endpoint,
+            payload = payload,
+            mtu = negotiatedMtu,
+            sessionKey = key,
+            encryptedSeq = if (key != null) encryptedSeq++ else 0
+        )
+
+        val canWriteWithoutResponse =
+            (char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+
         for (packet in packets) {
-            writeRaw(gatt, char, packet, noResponse = true)
+            writeRaw(gatt, char, packet, noResponse = canWriteWithoutResponse)
         }
     }
 
