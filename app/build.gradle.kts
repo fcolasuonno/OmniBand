@@ -7,11 +7,11 @@ plugins {
 }
 
 android {
-    namespace = "com.omniband"
+    namespace = "nodomain.freeyourgadget.gadgetbridge"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.omniband"
+        applicationId = "nodomain.freeyourgadget.gadgetbridge"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
