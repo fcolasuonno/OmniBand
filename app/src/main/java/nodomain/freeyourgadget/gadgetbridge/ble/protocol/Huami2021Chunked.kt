@@ -16,10 +16,13 @@ import javax.crypto.spec.SecretKeySpec
 object Huami2021Chunked {
 
     // ── Endpoints ────────────────────────────────────────────────────
+    const val ENDPOINT_SERVICES: Short = 0x0001.toShort()
     const val ENDPOINT_AUTH         : Short = 0x0082.toShort()
+    const val ENDPOINT_AUTH_ZEPPOS: Short = 0x0002.toShort()
+    const val ENDPOINT_AUTH_RESP: Short = 0x0082.toShort()
     const val ENDPOINT_FIND_DEVICE  : Short = 0x001a.toShort()
     const val ENDPOINT_HEARTRATE    : Short = 0x001d.toShort()
-    const val ENDPOINT_BATTERY      : Short = 0x0029.toShort()
+    const val ENDPOINT_BATTERY: Short = 0x0021.toShort()
     const val ENDPOINT_TIME: Short = 0x0047.toShort()
     const val ENDPOINT_STEPS: Short = 0x0016.toShort()
     const val ENDPOINT_ACTIVITY_FETCH: Short = 0x004b.toShort()
@@ -107,7 +110,7 @@ object Huami2021Chunked {
 
         if (encrypt) {
             val messageKey =
-                ByteArray(16) { i -> (sessionKey!![i].toInt() xor handle.toInt()).toByte() }
+                ByteArray(16) { i -> (sessionKey!![i].toInt() xor (handle.toInt() and 0xFF)).toByte() }
 
             // Prepare payload for encryption: data + seq(4) + crc(4)
             var encryptedLen = originalLength + 8
@@ -169,9 +172,11 @@ object Huami2021Chunked {
     }
 
     class Decoder {
+        @Volatile
         var sessionKey: ByteArray? = null
         
         private var currentHandle: Byte? = null
+        private var lastCount: Int = -1
         private var currentEndpoint: Short = 0
         private var currentLength: Int = 0 // Original unencrypted length
         private var buffer: ByteBuffer? = null
@@ -197,6 +202,7 @@ object Huami2021Chunked {
 
             var offset = 5
             if (isFirst) {
+                reset()
                 if (data.size < 11) return null
                 currentLength = ByteBuffer.wrap(data, 5, 4).order(ByteOrder.LITTLE_ENDIAN).int
 
@@ -215,11 +221,18 @@ object Huami2021Chunked {
 
                 currentEndpoint = ByteBuffer.wrap(data, 9, 2).order(ByteOrder.LITTLE_ENDIAN).short
                 currentHandle = handle
+                lastCount = count.toInt() and 0xFF
                 isEncryptedMessage = encrypted
                 buffer = ByteBuffer.allocate(allocLength)
                 offset = 11
-            } else if (handle != currentHandle || buffer == null) {
-                return null
+            } else {
+                if (handle != currentHandle || buffer == null) return null
+                val c = count.toInt() and 0xFF
+                if (c <= lastCount) {
+                    // Ignore duplicate or out-of-order chunk
+                    return DecodeResult(null, needsAck, handle, count)
+                }
+                lastCount = c
             }
 
             val payloadSize = data.size - offset
@@ -239,11 +252,31 @@ object Huami2021Chunked {
                 try {
                     var payload = buffer!!.array().copyOf(buffer!!.position())
                     if (isEncryptedMessage) {
-                        val key = sessionKey ?: throw Exception("Session key missing")
+                        val key = sessionKey
+                        if (key == null) {
+                            Timber.e(
+                                "MiBand7: Decrypt fail - session key missing for 0x${
+                                    currentEndpoint.toString(
+                                        16
+                                    )
+                                }"
+                            )
+                            return null
+                        }
                         val messageKey =
-                            ByteArray(16) { i -> (key[i].toInt() xor handle.toInt()).toByte() }
-                        val decrypted = aesEcbDecrypt(messageKey, payload)
-                        payload = decrypted.copyOf(currentLength)
+                            ByteArray(16) { i -> (key[i].toInt() xor (handle.toInt() and 0xFF)).toByte() }
+                        try {
+                            val decrypted = aesEcbDecrypt(messageKey, payload)
+                            payload = decrypted.copyOf(currentLength)
+                        } catch (e: Exception) {
+                            Timber.e(
+                                e,
+                                "Huami 2021 decryption failed for endpoint 0x${
+                                    currentEndpoint.toString(16).padStart(4, '0')
+                                }"
+                            )
+                            throw e
+                        }
                     }
                     resultMsg = Message(currentEndpoint, payload, handle, count)
                 } catch (e: Exception) {
@@ -257,6 +290,9 @@ object Huami2021Chunked {
 
         private fun reset() {
             currentHandle = null
+            lastCount = -1
+            currentEndpoint = 0
+            currentLength = 0
             buffer = null
             isEncryptedMessage = false
         }

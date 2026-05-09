@@ -23,14 +23,20 @@ interface DeviceProtocol {
      *
      * @param awaitDescriptorWrite  Suspend function that completes when the most recently
      *   issued [BluetoothGatt.writeDescriptor] call is acknowledged by the remote device via
-     *   [BluetoothGattCallback.onDescriptorWrite]. Protocols MUST call this after every
-     *   descriptor write to serialise GATT operations — Android only allows one outstanding
-     *   GATT operation at a time.
+     *   [BluetoothGattCallback.onDescriptorWrite].
+     * @param awaitCharacteristicWrite Suspend function that completes when the most recently
+     *   issued [BluetoothGatt.writeCharacteristic] call is acknowledged by the remote device via
+     *   [BluetoothGattCallback.onCharacteristicWrite].
+     *
+     * Protocols MUST call these after every write to serialise GATT operations — Android only
+     * allows one outstanding GATT operation at a time.
+     *
      * @return true if initialisation was successful
      */
     suspend fun initialize(
         gatt: BluetoothGatt,
-        awaitDescriptorWrite: suspend () -> Unit
+        awaitDescriptorWrite: suspend () -> Unit,
+        awaitCharacteristicWrite: suspend () -> Unit
     ): Boolean
 
     /**

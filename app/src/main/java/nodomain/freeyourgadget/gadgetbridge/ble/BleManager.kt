@@ -47,33 +47,6 @@ import javax.inject.Singleton
 
 /**
  * Central BLE connection manager.
- *
- * ═══════════════════════════════════════════════════════════════════
- * BUG FIXES IN THIS REVISION
- * ═══════════════════════════════════════════════════════════════════
- *
- * Fix 2 — MTU NEVER REACHED THE PROTOCOL
- *   ✗ Was: onMtuChanged called protocol.onMtuNegotiated() but activeProtocol
- *          is null at that point — created later in onServicesDiscovered.
- *   ✓ Fix: Store negotiatedMtu locally. In onServicesDiscovered, after creating
- *          the protocol object but BEFORE calling initialize(), invoke
- *          (protocol as? MiBand7Protocol)?.onMtuNegotiated(negotiatedMtu).
- *
- * Fix 3 — DESCRIPTOR WRITE RACE
- *   ✗ Was: initialize(gatt) with no way to wait for onDescriptorWrite. Protocol
- *          used delay(300) between descriptor writes — too short on some phones,
- *          causing the second descriptor write to be silently dropped.
- *   ✓ Fix: Added _descriptorWriteChannel (Channel<Unit>, UNLIMITED capacity).
- *          onDescriptorWrite emits to it. initialize() receives a suspend lambda
- *          that calls channel.receive(), so the protocol fully serializes ops.
- *
- * Additional fixes:
- *   • discoverServices() called from onMtuChanged, not from a blind postDelayed.
- *   • onCharacteristicChanged(gatt, char) deprecated overload properly delegates
- *     so older Android versions still work.
- *   • handleGattError() now also calls refreshGattCache before closing, fixing
- *     the stale-cache variant of GATT error 133.
- * ═══════════════════════════════════════════════════════════════════
  */
 @SuppressLint("MissingPermission")
 @Singleton
@@ -107,12 +80,9 @@ class BleManager @Inject constructor(
     private var targetDeviceType: DeviceType?     = null
     private var storedAuthKey:  String?           = null
 
-    // FIX 2: stored here, applied to protocol right before initialize()
-    private var negotiatedMtu: Int = 23  // conservative default (ATT minimum)
-
-    // FIX 3: each onDescriptorWrite sends Unit into this channel;
-    // the protocol's awaitDescriptorWrite lambda receives from it.
+    private var negotiatedMtu: Int = 23
     private var descriptorWriteChannel = Channel<Unit>(Channel.UNLIMITED)
+    private var characteristicWriteChannel = Channel<Unit>(Channel.UNLIMITED)
 
     private var isScanning = false
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -126,7 +96,8 @@ class BleManager @Inject constructor(
                 deviceType = targetDeviceType ?: DeviceType.XIAOMI_SMART_BAND_7,
                 attempt    = attempt
             )
-            targetDevice?.let { connectToDevice(it) } ?: false
+            targetDevice?.let { managerScope.launch { connectToDevice(it) } }
+            true
         },
         onMaxAttemptsReached = {
             _connectionState.value = ConnectionState.Disconnected
@@ -144,9 +115,6 @@ class BleManager @Inject constructor(
             .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
             .build()
 
-        // We don't use strict name filters here because many devices include 
-        // a suffix (e.g. "Xiaomi Smart Band 7 ABCD") that would fail an exact match.
-        // We filter manually in the callback instead.
         bluetoothAdapter?.bluetoothLeScanner?.startScan(null, settings, scanCallback)
         isScanning = true
         _scannedDevices.value = emptyList()
@@ -180,6 +148,14 @@ class BleManager @Inject constructor(
     // ── Connection ──────────────────────────────────────────────────
 
     fun connect(address: String, deviceType: DeviceType, authKey: String? = null) {
+        val state = _connectionState.value
+        if ((state is ConnectionState.Connecting || state is ConnectionState.Initializing) &&
+            targetDevice?.address == address
+        ) {
+            Timber.d("BleManager: already connecting/initializing to $address, ignoring request")
+            return
+        }
+
         val device = bluetoothAdapter?.getRemoteDevice(address) ?: run {
             Timber.e("BleManager: cannot get remote device $address"); return
         }
@@ -196,11 +172,10 @@ class BleManager @Inject constructor(
 
     private suspend fun connectToDevice(device: BluetoothDevice): Boolean {
         closeGatt()
-        delay(600)  // Let the BT stack settle — reduces GATT error 133
+        delay(600)
 
         Timber.i("BleManager: connecting to ${device.address} (${targetDeviceType?.displayName})")
 
-        // autoConnect=false → faster initial connection
         @Suppress("DEPRECATION")
         activeGatt = device.connectGatt(
             context,
@@ -226,13 +201,11 @@ class BleManager @Inject constructor(
     private fun closeGatt() {
         activeGatt?.let { gatt ->
             gatt.disconnect()
-            refreshGattCache(gatt)   // clears stale cache → prevents error 133 on re-connect
+            refreshGattCache(gatt)
             gatt.close()
             activeGatt = null
         }
     }
-
-    // ── GATT cache refresh (fixes error 133 on reconnect) ──────────
 
     private fun refreshGattCache(gatt: BluetoothGatt): Boolean = try {
         val refresh: Method = gatt.javaClass.getMethod("refresh")
@@ -258,11 +231,9 @@ class BleManager @Inject constructor(
                     _connectionState.value = ConnectionState.Initializing(address, deviceType)
                     reconnectionManager.stop()
 
-                    // Fresh channel for this connection to avoid stale signals from previous attempts
                     descriptorWriteChannel = Channel(Channel.UNLIMITED)
+                    characteristicWriteChannel = Channel(Channel.UNLIMITED)
 
-                    // FIX 2: request MTU first; service discovery is triggered in onMtuChanged
-                    // so the protocol gets the negotiated MTU before initialize() is called.
                     if (!gatt.requestMtu(512)) {
                         Timber.w("BleManager: requestMtu returned false, proceeding to discovery")
                         mainHandler.postDelayed({ gatt.discoverServices() }, 600)
@@ -281,10 +252,6 @@ class BleManager @Inject constructor(
             }
         }
 
-        /**
-         * FIX 2: Service discovery now starts HERE, after MTU is negotiated
-         * and stored, NOT from a fire-and-forget postDelayed in onConnectionStateChange.
-         */
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 negotiatedMtu = mtu
@@ -292,8 +259,6 @@ class BleManager @Inject constructor(
             } else {
                 Timber.w("BleManager: MTU negotiation failed (status=$status), using default $negotiatedMtu")
             }
-            // Always proceed to service discovery regardless of MTU result
-            // Increased delay to 600ms to allow some BT stacks to settle after MTU change
             mainHandler.postDelayed({ gatt.discoverServices() }, 600)
         }
 
@@ -303,28 +268,36 @@ class BleManager @Inject constructor(
                 handleGattError(gatt.device.address, targetDeviceType ?: return, status)
                 return
             }
+
+            if (_connectionState.value is ConnectionState.Connected) {
+                Timber.d("BleManager: already connected, ignoring extra onServicesDiscovered")
+                return
+            }
+            if (_connectionState.value is ConnectionState.Initializing && initializationJob?.isActive == true) {
+                Timber.d("BleManager: already initializing, ignoring extra onServicesDiscovered")
+                return
+            }
+
             Timber.i("BleManager: ${gatt.services.size} services discovered on ${gatt.device.address}")
 
-            // Boost connection priority for faster auth & data sync
             gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
 
             initializationJob?.cancel()
             initializationJob = managerScope.launch {
-                // Create protocol
                 val protocol = createProtocol(targetDeviceType!!)
                 activeProtocol?.destroy()
                 activeProtocol = protocol
 
-                // FIX 2: set negotiated MTU BEFORE calling initialize()
                 if (protocol is MiBand7Protocol) {
                     protocol.onMtuNegotiated(negotiatedMtu)
                     Timber.d("BleManager: set MTU=$negotiatedMtu on MiBand7Protocol ✓")
                 }
 
-                // FIX 3: pass the awaitDescriptorWrite lambda backed by the Channel
-                val success = protocol.initialize(gatt) {
-                    descriptorWriteChannel.receive()
-                }
+                val success = protocol.initialize(
+                    gatt,
+                    awaitDescriptorWrite = { descriptorWriteChannel.receive() },
+                    awaitCharacteristicWrite = { characteristicWriteChannel.receive() }
+                )
 
                 if (success) {
                     _connectionState.value = ConnectionState.Connected(
@@ -332,7 +305,6 @@ class BleManager @Inject constructor(
                         targetDeviceType!!
                     )
                     Timber.i("BleManager: device fully initialized ✓")
-                    // Drop connection priority after auth to save power
                     launch {
                         delay(2_000)
                         gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
@@ -345,10 +317,6 @@ class BleManager @Inject constructor(
             }
         }
 
-        /**
-         * FIX 3: emit to _descriptorWriteChannel so the protocol's
-         * awaitDescriptorWrite() lambda can unblock and continue.
-         */
         override fun onDescriptorWrite(
             gatt: BluetoothGatt,
             descriptor: BluetoothGattDescriptor,
@@ -359,12 +327,9 @@ class BleManager @Inject constructor(
             } else {
                 Timber.v("BleManager: descriptor write OK uuid=${descriptor.uuid}")
             }
-            // Always signal — the protocol needs to unblock even on failure
-            // so it can log the error rather than hanging forever.
             descriptorWriteChannel.trySend(Unit)
         }
 
-        /** API 33+: new overload with value parameter */
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
@@ -373,7 +338,6 @@ class BleManager @Inject constructor(
             activeProtocol?.onCharacteristicChanged(gatt, characteristic, value)
         }
 
-        /** API < 33: deprecated overload — must still be implemented for older devices */
         @Deprecated("Deprecated in Android 13 but required for API < 33")
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
@@ -390,11 +354,12 @@ class BleManager @Inject constructor(
         ) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Timber.w("BleManager: characteristic write FAILED uuid=${characteristic.uuid} status=$status")
+            } else {
+                Timber.v("BleManager: characteristic write OK uuid=${characteristic.uuid}")
             }
+            characteristicWriteChannel.trySend(Unit)
         }
     }
-
-    // ── Disconnect / error handling ──────────────────────────────────
 
     private fun handleDisconnect(address: String, deviceType: DeviceType) {
         initializationJob?.cancel()
@@ -415,7 +380,7 @@ class BleManager @Inject constructor(
         initializationJob?.cancel()
         initializationJob = null
         activeGatt?.let { gatt ->
-            refreshGattCache(gatt)  // flush stale cache that causes error 133
+            refreshGattCache(gatt)
             gatt.close()
             activeGatt = null
         }
@@ -430,8 +395,6 @@ class BleManager @Inject constructor(
         }
     }
 
-    // ── Protocol factory ─────────────────────────────────────────────
-
     private fun createProtocol(deviceType: DeviceType): DeviceProtocol = when (deviceType) {
         DeviceType.XIAOMI_SMART_BAND_7 -> {
             val key = storedAuthKey?.let { hexToBytes(it) } ?: ByteArray(16)
@@ -439,8 +402,6 @@ class BleManager @Inject constructor(
         }
         DeviceType.SONY_WF1000XM5 -> SonyWF1000XM5Protocol()
     }
-
-    // ── Command forwarding ───────────────────────────────────────────
 
     suspend fun vibrate(pattern: VibratePattern = VibratePattern.SHORT) {
         activeGatt?.let { activeProtocol?.vibrate(it, pattern) }
@@ -478,8 +439,6 @@ class BleManager @Inject constructor(
         activeGatt?.let { activeProtocol?.dismissAlarm(it) }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────
-
     private fun hasPermissions(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             listOf(
@@ -508,6 +467,7 @@ class BleManager @Inject constructor(
         closeGatt()
         activeProtocol?.destroy()
         descriptorWriteChannel.close()
+        characteristicWriteChannel.close()
         managerScope.cancel()
     }
 }

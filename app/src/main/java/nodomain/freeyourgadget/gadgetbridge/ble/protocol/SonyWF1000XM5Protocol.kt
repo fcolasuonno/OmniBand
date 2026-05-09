@@ -99,7 +99,8 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
 
     override suspend fun initialize(
         gatt: BluetoothGatt,
-        awaitDescriptorWrite: suspend () -> Unit, // FIX 3 — serialize GATT ops
+        awaitDescriptorWrite: suspend () -> Unit,
+        awaitCharacteristicWrite: suspend () -> Unit
     ): Boolean {
         Timber.i("SonyWF1000XM5: initializing ${gatt.device.address}")
 
