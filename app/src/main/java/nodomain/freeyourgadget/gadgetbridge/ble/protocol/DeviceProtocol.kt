@@ -137,6 +137,7 @@ enum class ANCMode { OFF, NOISE_CANCELLING, AMBIENT, WIND_REDUCTION }
  * Writes [value] to [characteristic] using the correct API for the running Android version.
  * Returns `true` if the write was accepted by the stack, `false` on error.
  */
+@Suppress("DEPRECATION")  // Pre-Tiramisu GATT API branch is intentionally kept
 fun BluetoothGatt.safeWriteCharacteristic(
     characteristic: BluetoothGattCharacteristic,
     value: ByteArray,
@@ -144,7 +145,7 @@ fun BluetoothGatt.safeWriteCharacteristic(
 ): Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
     writeCharacteristic(characteristic, value, writeType) == BluetoothGatt.GATT_SUCCESS
 } else {
-    @Suppress("DEPRECATION") characteristic.value = value
-    @Suppress("DEPRECATION") characteristic.writeType = writeType
-    @Suppress("DEPRECATION") writeCharacteristic(characteristic)
+    characteristic.value = value
+    characteristic.writeType = writeType
+    writeCharacteristic(characteristic)
 }

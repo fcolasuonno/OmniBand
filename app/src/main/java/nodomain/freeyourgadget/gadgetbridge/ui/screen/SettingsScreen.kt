@@ -17,17 +17,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FitnessCenter
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Watch
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -54,7 +54,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.DeviceEntity
 import nodomain.freeyourgadget.gadgetbridge.ui.viewmodel.SettingsViewModel
@@ -195,7 +195,11 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(10.dp)
                     ) {
-                        Icon(Icons.Filled.OpenInNew, "Open SaA", modifier = Modifier.size(16.dp))
+                        Icon(
+                            Icons.AutoMirrored.Filled.OpenInNew,
+                            "Open SaA",
+                            modifier = Modifier.size(16.dp)
+                        )
                         Spacer(Modifier.width(6.dp))
                         Text("Open Sleep as Android")
                     }
@@ -210,7 +214,10 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Icon(Icons.Filled.DirectionsWalk, "Steps", tint = MaterialTheme.colorScheme.primary,
+                Icon(
+                    Icons.AutoMirrored.Filled.DirectionsWalk,
+                    "Steps",
+                    tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(20.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Daily Step Goal", style = MaterialTheme.typography.bodyLarge)

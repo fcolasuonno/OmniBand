@@ -346,6 +346,7 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
         return packet
     }
 
+    @Suppress("DEPRECATION")  // Pre-Tiramisu GATT API branch is intentionally kept
     private fun enableNotification(
         gatt: BluetoothGatt,
         char: BluetoothGattCharacteristic
@@ -356,8 +357,8 @@ class SonyWF1000XM5Protocol : DeviceProtocol {
             gatt.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ==
                     BluetoothStatusCodes.SUCCESS
         } else {
-            @Suppress("DEPRECATION") desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            @Suppress("DEPRECATION") gatt.writeDescriptor(desc)
+            desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            gatt.writeDescriptor(desc)
         }
     }
 }

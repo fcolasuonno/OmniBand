@@ -19,19 +19,19 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.DirectionsRun
+import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
+import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Bloodtype
-import androidx.compose.material.icons.filled.DirectionsRun
-import androidx.compose.material.icons.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
@@ -54,7 +54,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.HeartRateEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepSessionEntity
@@ -81,7 +81,7 @@ fun HealthScreen(viewModel: HealthViewModel = hiltViewModel()) {
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Tab bar
-        TabRow(selectedTabIndex = selectedTab) {
+        PrimaryTabRow(selectedTabIndex = selectedTab) {
             tabs.forEachIndexed { i, title ->
                 Tab(
                     selected = selectedTab == i,
@@ -192,7 +192,12 @@ fun HeartRateLineChart(readings: List<HeartRateEntity>) {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Icon(Icons.Filled.ShowChart, "HR Chart", tint = HeartRed, modifier = Modifier.size(16.dp))
+                Icon(
+                    Icons.AutoMirrored.Filled.ShowChart,
+                    "HR Chart",
+                    tint = HeartRed,
+                    modifier = Modifier.size(16.dp)
+                )
                 Text("Heart Rate (last ${readings.size} readings)", style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
             }
@@ -275,7 +280,7 @@ fun HrReadingRow(entity: HeartRateEntity, timeFormat: SimpleDateFormat) {
 fun StepsTab(stepsList: List<StepsEntity>) {
     if (stepsList.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            EmptyState(Icons.Filled.DirectionsWalk, "No steps data yet.")
+            EmptyState(Icons.AutoMirrored.Filled.DirectionsWalk, "No steps data yet.")
         }
         return
     }
@@ -301,7 +306,12 @@ fun StepsTab(stepsList: List<StepsEntity>) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        Icon(Icons.Filled.DirectionsRun, "Steps", tint = StepGreen, modifier = Modifier.size(36.dp))
+                        Icon(
+                            Icons.AutoMirrored.Filled.DirectionsRun,
+                            "Steps",
+                            tint = StepGreen,
+                            modifier = Modifier.size(36.dp)
+                        )
                         Column {
                             Text("Today", style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))

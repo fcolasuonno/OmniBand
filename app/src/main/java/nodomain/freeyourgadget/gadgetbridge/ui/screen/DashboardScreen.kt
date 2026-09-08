@@ -24,18 +24,18 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.BatteryUnknown
+import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
+import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.Battery0Bar
 import androidx.compose.material.icons.filled.Battery2Bar
 import androidx.compose.material.icons.filled.Battery4Bar
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.BatteryFull
-import androidx.compose.material.icons.filled.BatteryUnknown
 import androidx.compose.material.icons.filled.Bloodtype
 import androidx.compose.material.icons.filled.BluetoothDisabled
-import androidx.compose.material.icons.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Headphones
-import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.Vibration
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -58,7 +58,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import nodomain.freeyourgadget.gadgetbridge.ble.ConnectionState
@@ -314,7 +314,12 @@ fun StepsCard(steps: Int, goal: Int, calories: Int, distanceMeters: Float) {
     ) {
         Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(Icons.Filled.DirectionsWalk, "Steps", tint = StepGreen, modifier = Modifier.size(20.dp))
+                Icon(
+                    Icons.AutoMirrored.Filled.DirectionsWalk,
+                    "Steps",
+                    tint = StepGreen,
+                    modifier = Modifier.size(20.dp)
+                )
                 Text("Steps", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
                 Text("$steps / $goal", style = MaterialTheme.typography.bodyMedium,
@@ -367,7 +372,12 @@ fun HeartRateSparklineCard(readings: List<Int>) {
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(Icons.Filled.ShowChart, "HR Chart", tint = HeartRed, modifier = Modifier.size(18.dp))
+                Icon(
+                    Icons.AutoMirrored.Filled.ShowChart,
+                    "HR Chart",
+                    tint = HeartRed,
+                    modifier = Modifier.size(18.dp)
+                )
                 Text("Recent Heart Rate", style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.weight(1f))
                 Text("${readings.last()} bpm", style = MaterialTheme.typography.bodyMedium,
@@ -416,7 +426,7 @@ fun BatteryIndicator(percent: Int?, charging: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         if (charging) Icon(Icons.Filled.BatteryChargingFull, "Charging", tint = BatteryAmber, modifier = Modifier.size(20.dp))
         val batteryIcon = when {
-            percent == null         -> Icons.Filled.BatteryUnknown
+            percent == null -> Icons.AutoMirrored.Filled.BatteryUnknown
             percent > 80            -> Icons.Filled.BatteryFull
             percent > 50            -> Icons.Filled.Battery4Bar
             percent > 20            -> Icons.Filled.Battery2Bar

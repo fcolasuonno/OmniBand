@@ -216,7 +216,7 @@ object Huami2021Chunked {
 
         val dataToSend: ByteArray = if (encrypt) {
             val messageKey = ByteArray(16) { i ->
-                (sessionKey!![i].toInt() xor (handle.toInt() and 0xFF)).toByte()
+                (sessionKey[i].toInt() xor (handle.toInt() and 0xFF)).toByte()
             }
 
             // Plaintext block: payload | seq(4 LE) | CRC32(payload|seq)(4 LE), padded to 16n

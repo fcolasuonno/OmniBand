@@ -812,6 +812,7 @@ class MiBand7Protocol(
             }
         }
 
+    @Suppress("DEPRECATION")  // Pre-Tiramisu GATT API branch is intentionally kept
     private suspend fun writeRaw(
         gatt: BluetoothGatt,
         char: BluetoothGattCharacteristic?,
@@ -830,9 +831,8 @@ class MiBand7Protocol(
                 awaitCharacteristicWrite?.invoke()
             }
         } else {
-            @Suppress("DEPRECATION") char.value = data
-            @Suppress("DEPRECATION") char.writeType = writeType
-            @Suppress("DEPRECATION")
+            char.value = data
+            char.writeType = writeType
             if (gatt.writeCharacteristic(char)) {
                 if (!noResponse) awaitCharacteristicWrite?.invoke()
             } else {
@@ -841,6 +841,7 @@ class MiBand7Protocol(
         }
     }
 
+    @Suppress("DEPRECATION")  // Pre-Tiramisu GATT API branch is intentionally kept
     private fun enableNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic): Boolean {
         if (!gatt.setCharacteristicNotification(char, true)) return false
         val desc = char.getDescriptor(UUID_CCCD) ?: return false
@@ -849,8 +850,8 @@ class MiBand7Protocol(
             gatt.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ==
                     BluetoothStatusCodes.SUCCESS
         } else {
-            @Suppress("DEPRECATION") desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            @Suppress("DEPRECATION") gatt.writeDescriptor(desc)
+            desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            gatt.writeDescriptor(desc)
         }
     }
 

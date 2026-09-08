@@ -177,7 +177,7 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 
 @Singleton
 class UserPreferencesRepository @Inject constructor(
-    @ApplicationContext private val context: Context
+    @param:ApplicationContext private val context: Context
 ) {
     private object Keys {
         val ACTIVE_DEVICE_ADDRESS = stringPreferencesKey("active_device_address")
