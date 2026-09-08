@@ -247,8 +247,9 @@ fun ScannedDeviceCard(device: ScannedDevice, onConnect: () -> Unit) {
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.SemiBold
                 )
+                // MAC address — essential when several bands advertise the same name
                 Text(
-                    device.deviceType?.displayName ?: device.address,
+                    device.address,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
@@ -286,6 +287,8 @@ fun AuthKeyDialog(
 ) {
     var authKey by remember { mutableStateOf("") }
     var showKey by remember { mutableStateOf(false) }
+    // The extractor prints the key with a "0x" prefix — accept both forms
+    val normalizedKey = authKey.trim().removePrefix("0x").removePrefix("0X")
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -316,9 +319,9 @@ fun AuthKeyDialog(
                             )
                         }
                     },
-                    isError = authKey.isNotBlank() && authKey.length != 32,
-                    supportingText = if (authKey.isNotBlank() && authKey.length != 32) {
-                        { Text("Key must be 32 hex characters") }
+                    isError = normalizedKey.isNotEmpty() && normalizedKey.length != 32,
+                    supportingText = if (normalizedKey.isNotEmpty() && normalizedKey.length != 32) {
+                        { Text("Key must be 32 hex characters (0x prefix optional)") }
                     } else null
                 )
                 TextButton(onClick = { onConfirm("") }, modifier = Modifier.align(Alignment.End)) {
@@ -328,8 +331,8 @@ fun AuthKeyDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(authKey) },
-                enabled = authKey.length == 32 || authKey.isBlank()
+                onClick = { onConfirm(normalizedKey) },
+                enabled = normalizedKey.length == 32 || normalizedKey.isEmpty()
             ) { Text("Connect") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }

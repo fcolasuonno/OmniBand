@@ -249,6 +249,8 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
 
     // Auth key dialog
     if (showAuthDialog) {
+        // The extractor prints the key with a "0x" prefix — accept both forms
+        val normalizedKey = authKeyInput.trim().removePrefix("0x").removePrefix("0X")
         AlertDialog(
             onDismissRequest = { showAuthDialog = false },
             icon = { Icon(Icons.Filled.Key, "Auth Key") },
@@ -263,9 +265,9 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                         label = { Text("Auth Key") },
                         placeholder = { Text("00112233445566778899aabbccddeeff") },
                         singleLine = true,
-                        isError = authKeyInput.isNotBlank() && authKeyInput.length != 32,
-                        supportingText = if (authKeyInput.isNotBlank() && authKeyInput.length != 32) {
-                            { Text("Must be 32 hex characters (16 bytes)") }
+                        isError = normalizedKey.isNotEmpty() && normalizedKey.length != 32,
+                        supportingText = if (normalizedKey.isNotEmpty() && normalizedKey.length != 32) {
+                            { Text("Must be 32 hex characters (0x prefix optional)") }
                         } else null
                     )
                 }
@@ -273,10 +275,10 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
             confirmButton = {
                 Button(
                     onClick = {
-                        viewModel.saveAuthKey(authKeyInput)
+                        viewModel.saveAuthKey(normalizedKey)
                         showAuthDialog = false
                     },
-                    enabled = authKeyInput.length == 32
+                    enabled = normalizedKey.length == 32
                 ) { Text("Save") }
             },
             dismissButton = { TextButton(onClick = { showAuthDialog = false }) { Text("Cancel") } }

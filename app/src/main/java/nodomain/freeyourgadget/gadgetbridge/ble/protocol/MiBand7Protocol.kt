@@ -19,6 +19,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -35,7 +36,38 @@ import kotlin.experimental.xor
 
 /**
  * Protocol implementation for Xiaomi Smart Band 7 (ZeppOS).
- * Updated to use the 2021 Extended Header and B-163 ECDH flow.
+ *
+ * ## Authentication (ECDH B-163 + AES session key)
+ *
+ * ZeppOS devices do **not** use the plain AES-key auth of older Mi Bands.  Instead they
+ * perform a full Elliptic-Curve Diffie-Hellman key-exchange over the NIST B-163 curve,
+ * then derive a symmetric session key from the shared secret and the 16-byte pairing key
+ * stored in your Xiaomi account.  All subsequent communication on "encrypted" endpoints
+ * (battery, configuration, …) is protected with AES-128/ECB using a handle-derived
+ * per-message key.
+ *
+ * ### Handshake steps
+ * 1. **Phone → Band** (endpoint 0x0002): phone's B-163 public key
+ *    `[CMD=0x04][0x02][0x00][0x02][pubKey:48]`
+ * 2. **Band → Phone** (endpoint 0x0082): band's public key + random nonce
+ *    `[0x10][CMD=0x04][status=0x01][nonce:16][bandPubKey:48]`
+ * 3. Phone computes ECDH shared secret, derives session key:
+ *    `sessionKey[i] = shared[i+8] XOR authKey[i]`
+ * 4. **Phone → Band** (endpoint 0x0082): double-encrypted nonces
+ *    `[CMD=0x05][AES(authKey, nonce):16][AES(sessionKey, nonce):16]`
+ * 5. **Band → Phone** (endpoint 0x0082): auth result
+ *    `[0x10][CMD=0x05][status=0x01]` = success
+ *
+ * ## BLE characteristics
+ * | Role        | UUID suffix | Direction        |
+ * |-------------|-------------|------------------|
+ * | Write       | 0x0016      | Phone → Band     |
+ * | Notify/Read | 0x0017      | Band → Phone     |
+ * | Heart Rate  | 0x2A37      | Band → Phone (standard GATT HR service) |
+ *
+ * ## Obtaining the auth key
+ * Use [xiaomi-cloud-tokens-extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor)
+ * with your Xiaomi/Mi account to extract the 16-byte hex auth key for your band.
  */
 @SuppressLint("MissingPermission")
 class MiBand7Protocol(
@@ -43,19 +75,46 @@ class MiBand7Protocol(
 ) : DeviceProtocol {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     private val _events = MutableSharedFlow<DeviceEvent>(replay = 1, extraBufferCapacity = 64)
     override val events: Flow<DeviceEvent> = _events.asSharedFlow()
 
+    // ── GATT characteristic handles ───────────────────────────────────────────
+
     companion object {
+        /** Chunked-transfer write characteristic (phone → band). */
         val UUID_CHAR_CHUNKED_WRITE: UUID  = UUID.fromString("00000016-0000-3512-2118-0009af100700")
+
+        /** Chunked-transfer notify characteristic (band → phone). */
         val UUID_CHAR_CHUNKED_READ: UUID   = UUID.fromString("00000017-0000-3512-2118-0009af100700")
+
+        /** Standard GATT Heart Rate service UUID. */
         val UUID_SERVICE_HR: UUID          = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
+
+        /** Standard GATT Heart Rate Measurement characteristic UUID. */
         val UUID_CHAR_HR_MEASUREMENT: UUID = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb")
+
+        /** Standard GATT Client Characteristic Configuration Descriptor UUID. */
         val UUID_CCCD: UUID                = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
+        /** Standard GATT battery level characteristic UUID. */
+        private val UUID_CHAR_STD_BATTERY: UUID =
+            UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb")
+
+        /** Standard GATT battery service UUID. */
+        private val UUID_SERVICE_STD_BATTERY: UUID =
+            UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb")
+
+        /** How long to wait for the ECDH handshake to complete before giving up. */
         private const val AUTH_TIMEOUT_MS = 30_000L
-        
-        // Default ASCII key used by ZeppOS if no custom key is provided
+
+        /** How often to re-send the ECDH public key while waiting for the band's reply. */
+        private const val ECDH_RETRY_MS = 5_000L
+
+        /**
+         * Default ASCII auth key used by some ZeppOS devices before a custom key is set.
+         * The bytes spell "0123456789@ABCDE".
+         */
         private val DEFAULT_AUTH_KEY = byteArrayOf(
             0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
             0x38, 0x39, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45,
@@ -63,14 +122,20 @@ class MiBand7Protocol(
     }
 
     private var chunkedWrite: BluetoothGattCharacteristic? = null
-    private var chunkedRead:  BluetoothGattCharacteristic? = null
-    private var hrChar:       BluetoothGattCharacteristic? = null
+    private var chunkedRead: BluetoothGattCharacteristic? = null
+    private var hrChar: BluetoothGattCharacteristic? = null
 
     private val decoder = Huami2021Chunked.Decoder()
+
+    /** Monotonically increasing handle byte for outgoing chunked messages. */
     @Volatile
     private var handleSeq: Byte = 1
+
+    /** Monotonically increasing sequence counter embedded in encrypted payloads. */
     @Volatile
     private var encryptedSeq: Int = 0
+
+    /** Serialises all GATT write operations (Android only allows one in-flight at a time). */
     private val writeMutex = Mutex()
 
     var negotiatedMtu: Int = 23
@@ -88,20 +153,26 @@ class MiBand7Protocol(
     @Volatile
     private var isInitializingServices = false
 
+    // Auth-handshake state (only valid during the handshake coroutine)
     @Volatile private var authContinuation: Continuation<Boolean>? = null
-    @Volatile private var pendingEncKey:    ByteArray?              = null
+    @Volatile
+    private var authAttempts: Int = 0
+    @Volatile
+    private var pendingEncKey: ByteArray? = null
     @Volatile
     private var pendingEncSeq: Int = 0
-    @Volatile private var privateEC:        ByteArray?              = null
+    @Volatile
+    private var privateEC: ByteArray? = null
 
+    // GATT operation completions provided by BleManager
     private var awaitDescriptorWrite: (suspend () -> Unit)? = null
     private var awaitCharacteristicWrite: (suspend () -> Unit)? = null
 
-    // Effective auth key (provided or default)
+    /** Auth key to use: the provided key if non-zero, otherwise the hardcoded default. */
     private val effectiveAuthKey: ByteArray
         get() = if (authKey.all { it == 0.toByte() }) DEFAULT_AUTH_KEY else authKey
 
-    // ── Initialization ───────────────────────────────────────────────
+    // ── Initialisation ────────────────────────────────────────────────────────
 
     override suspend fun initialize(
         gatt: BluetoothGatt,
@@ -109,7 +180,7 @@ class MiBand7Protocol(
         awaitCharacteristicWrite: suspend () -> Unit,
     ): Boolean {
         if (isInitialized) {
-            Timber.w("MiBand7: already initialized, skipping…")
+            Timber.w("MiBand7: already initialized, skipping")
             return true
         }
         isInitialized = true
@@ -118,26 +189,29 @@ class MiBand7Protocol(
 
         Timber.i("MiBand7: initializing ${gatt.device.address} (MTU=$negotiatedMtu)")
 
+        // Locate chunked-transfer characteristics (they can appear in any service)
         for (svc in gatt.services) {
             if (chunkedWrite == null) chunkedWrite = svc.getCharacteristic(UUID_CHAR_CHUNKED_WRITE)
             if (chunkedRead  == null) chunkedRead  = svc.getCharacteristic(UUID_CHAR_CHUNKED_READ)
         }
         hrChar = gatt.getService(UUID_SERVICE_HR)?.getCharacteristic(UUID_CHAR_HR_MEASUREMENT)
-        val stdBattery = gatt.getService(UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb"))
-            ?.getCharacteristic(UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb"))
+        val stdBatteryChar = gatt.getService(UUID_SERVICE_STD_BATTERY)
+            ?.getCharacteristic(UUID_CHAR_STD_BATTERY)
 
-        if ((chunkedWrite == null) || (chunkedRead == null)) {
-            Timber.e("MiBand7: chunked characteristics not found")
+        if (chunkedWrite == null || chunkedRead == null) {
+            Timber.e("MiBand7: chunked-transfer characteristics not found — wrong device?")
             return false
         }
 
         delay(600)
 
-        // Subscribe to chunked notifications
+        // Subscribe to chunked-read notifications (band → phone data path)
         if (!enableNotification(gatt, chunkedRead!!)) return false
         awaitDescriptorWrite()
         delay(200)
 
+        // Subscribe to chunked-write notifications if the characteristic also notifies
+        // (used for ACKs from the band acknowledging our writes)
         if ((chunkedWrite!!.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0) {
             if (enableNotification(gatt, chunkedWrite!!)) {
                 awaitDescriptorWrite()
@@ -145,6 +219,7 @@ class MiBand7Protocol(
             }
         }
 
+        // Subscribe to the standard HR service (provides raw BPM without using a chunked command)
         hrChar?.let {
             if (enableNotification(gatt, it)) {
                 awaitDescriptorWrite()
@@ -152,8 +227,9 @@ class MiBand7Protocol(
             }
         }
 
-        stdBattery?.let {
-            Timber.i("MiBand7: Found standard battery service, enabling notification")
+        // Subscribe to standard GATT battery service as a fallback
+        stdBatteryChar?.let {
+            Timber.i("MiBand7: standard GATT battery service found — subscribing")
             if (enableNotification(gatt, it)) {
                 awaitDescriptorWrite()
                 delay(200)
@@ -165,24 +241,30 @@ class MiBand7Protocol(
         return try {
             withTimeout(AUTH_TIMEOUT_MS) { runEcdhHandshake(gatt) }
         } catch (e: Exception) {
-            Timber.e(e, "MiBand7: auth handshake failed")
-            authContinuation?.resume(value = false)
+            Timber.e(
+                e,
+                "MiBand7: ECDH handshake failed after %d attempt(s) — the band never completed the key exchange. " +
+                        "Usual causes: band still connected to another phone (Zepp app), stale/incorrect auth key, " +
+                        "or the band needs to be unbound/factory-reset.",
+                authAttempts
+            )
+            authContinuation?.resume(false)
             authContinuation = null
             false
         }
     }
 
-    // ── ECDH Handshake (ZeppOS Flow) ─────────────────────────────────
+    // ── ECDH handshake ────────────────────────────────────────────────────────
 
     private suspend fun runEcdhHandshake(gatt: BluetoothGatt): Boolean {
-        // Mi Band 7 uses B-163 curve for ECDH
-        val priv = ByteArray(ECDH_B163.ECC_PRV_KEY_SIZE).apply { 
-            SecureRandom().nextBytes(this) 
-        }
+        // Generate ephemeral B-163 key pair
+        val priv = ByteArray(ECDH_B163.ECC_PRV_KEY_SIZE).apply { SecureRandom().nextBytes(this) }
         privateEC = priv
-        val pub = ECDH_B163.generatePublic(priv) ?: throw Exception("EC pubkey gen failed")
+        val pub =
+            ECDH_B163.generatePublic(priv) ?: throw Exception("B-163 public key generation failed")
 
-        // ZeppOS public key command: [0x04][0x02][0x00][0x02][pub:48]
+        // Send our public key to the ZeppOS auth endpoint (0x0002)
+        // Format: [CMD=0x04][0x02][0x00][0x02][pubKey:48]
         val payload = ByteBuffer.allocate(4 + ECDH_B163.ECC_PUB_KEY_SIZE).apply {
             put(Huami2021Chunked.AUTH_CMD_PUB_KEY)
             put(0x02.toByte())
@@ -191,66 +273,86 @@ class MiBand7Protocol(
             put(pub)
         }.array()
 
-        writeChunked(gatt, Huami2021Chunked.ENDPOINT_AUTH_ZEPPOS, payload)
-        Timber.i("MiBand7: sent B-163 public key, awaiting band response…")
+        Timber.i(
+            "MiBand7: using auth key %s…%s",
+            effectiveAuthKey.copyOfRange(0, 2).toHex(),
+            effectiveAuthKey.copyOfRange(effectiveAuthKey.size - 2, effectiveAuthKey.size).toHex()
+        )
 
-        return suspendCancellableCoroutine { cont ->
-            authContinuation = cont
-            cont.invokeOnCancellation { authContinuation = null }
+        // The band sometimes ignores the first ECDH key (fresh GATT link, band still
+        // settling, or it is busy with another phone).  Re-send the *same* key every few
+        // seconds until it answers or the overall AUTH_TIMEOUT_MS expires.
+        //
+        // The request goes to ENDPOINT_AUTH (0x0082) — the same endpoint the band uses
+        // for its responses.  Writing to 0x0002 gets ACKed at the transport level but
+        // never triggers the key exchange.
+        while (true) {
+            authAttempts++
+            writeChunked(gatt, Huami2021Chunked.ENDPOINT_AUTH, payload)
+            Timber.i(
+                "MiBand7: sent B-163 public key (attempt %d) — awaiting band response…",
+                authAttempts
+            )
+
+            val result = withTimeoutOrNull(ECDH_RETRY_MS) {
+                suspendCancellableCoroutine { cont ->
+                    authContinuation = cont
+                    cont.invokeOnCancellation {
+                        if (authContinuation === cont) authContinuation = null
+                    }
+                }
+            }
+            if (result != null) return result
+
+            Timber.w("MiBand7: no band response (attempt %d) — re-sending ECDH key…", authAttempts)
+            delay(500)
         }
     }
 
-    // ── Incoming data ────────────────────────────────────────────────
+    // ── Incoming data dispatch ────────────────────────────────────────────────
 
     override fun onCharacteristicChanged(
         gatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic,
         value: ByteArray,
     ): Boolean {
-        Timber.v(
-            "MiBand7: RAW NOTIFY on ${characteristic.uuid}: ${
-                value.joinToString {
-                    it.toUByte().toString(16).padStart(2, '0')
-                }
-            }"
-        )
         val uuid = characteristic.uuid
-        if (uuid != UUID_CHAR_HR_MEASUREMENT) {
-            Timber.d(
-                "MiBand7: onCharacteristicChanged $uuid: ${
-                    value.joinToString {
-                        it.toUByte().toString(16).padStart(2, '0')
-                    }
-                }"
-            )
-        }
+        Timber.v("MiBand7: notify %s  [%s]", uuid, value.toHex())
 
         return when (uuid) {
             UUID_CHAR_CHUNKED_READ, UUID_CHAR_CHUNKED_WRITE -> {
-                if (value.isNotEmpty() && value[0] == 0x03.toByte()) {
-                    decoder.decode(value)?.let { result ->
-                        if (result.needsAck) sendAck(gatt, result.handle, result.count)
-                        result.message?.let { msg ->
-                            dispatch(gatt, msg.endpoint, msg.payload)
+                when {
+                    value.isEmpty() -> false
+                    value[0] == 0x03.toByte() -> {
+                        // Data packet from the band — reassemble and dispatch
+                        decoder.decode(value)?.let { result ->
+                            // ACK to the band goes to the WRITE characteristic (0x0016)
+                            if (result.needsAck) sendAck(gatt, result.handle, result.count)
+                            result.message?.let { msg ->
+                                dispatch(gatt, msg.endpoint, msg.payload)
+                            }
                         }
+                        true
                     }
-                    true
-                } else if (value.isNotEmpty() && value[0] == 0x04.toByte()) {
-                    // ACK from band for our writes
-                    true
-                } else {
-                    false
+
+                    value[0] == 0x04.toByte() -> {
+                        // ACK from the band acknowledging one of our writes — nothing to do
+                        true
+                    }
+
+                    else -> false
                 }
             }
 
             UUID_CHAR_HR_MEASUREMENT -> {
-                parseStdHr(value); true
+                parseStdHr(value)
+                true
             }
 
-            UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb") -> {
+            UUID_CHAR_STD_BATTERY -> {
                 if (value.isNotEmpty()) {
                     val level = value[0].toInt() and 0xFF
-                    Timber.i("MiBand7: standard battery update -> $level%")
+                    Timber.i("MiBand7: standard GATT battery → %d%%", level)
                     scope.launch { _events.emit(DeviceEvent.Battery(level)) }
                 }
                 true
@@ -260,50 +362,48 @@ class MiBand7Protocol(
         }
     }
 
+    /**
+     * Send a chunked-transfer ACK to the band.
+     *
+     * **Bug fix:** ACKs must be written to the *write* characteristic (0x0016), not the
+     * notify characteristic (0x0017).  The notify characteristic is read-only from the
+     * phone's perspective; writing to it would silently fail on most Android stacks.
+     *
+     * ACK format: `[0x04][0x00][handle][0x01][count]`
+     */
     private fun sendAck(gatt: BluetoothGatt, handle: Byte, count: Byte) {
-        Timber.v("MiBand7: sending chunked ACK for handle=$handle, count=$count")
-        // Ack format: [0x04][0x00][handle][0x01][count]
+        Timber.v(
+            "MiBand7: sending ACK  handle=0x%02x count=%d",
+            handle.toInt() and 0xFF,
+            count.toInt() and 0xFF
+        )
         val ack = byteArrayOf(0x04, 0x00, handle, 0x01, count)
         scope.launch {
-            writeRaw(gatt, chunkedRead, ack, noResponse = true)
+            // Write to chunkedWrite (0x0016) — the phone→band channel
+            writeRaw(gatt, chunkedWrite, ack, noResponse = true)
         }
     }
 
     private fun dispatch(gatt: BluetoothGatt, endpoint: Short, payload: ByteArray) {
-        Timber.v(
-            "MiBand7: dispatching endpoint 0x${endpoint.toString(16)}: ${
-                payload.joinToString {
-                    it.toUByte().toString(16).padStart(2, '0')
-                }
-            }"
+        Timber.d(
+            "MiBand7: dispatch endpoint=0x%04x size=%d  [%s]",
+            endpoint.toInt() and 0xFFFF, payload.size, payload.toHex()
         )
+
         when (endpoint) {
             Huami2021Chunked.ENDPOINT_SERVICES -> {
-                Timber.d("MiBand7: Got Services list (${payload.size} bytes)")
+                Timber.d("MiBand7: received services list (%d bytes)", payload.size)
                 if (!isInitializingServices) {
                     isInitializingServices = true
-                    scope.launch {
-                        delay(2000)
-                        requestDeviceInfo(gatt)
-                        delay(1000)
-                        syncTime(gatt)
-                        delay(1000)
-                        enableRealtimeSteps(gatt)
-
-                        // Periodic updates for battery and steps
-                        while (true) {
-                            requestBattery(gatt)
-                            delay(1000)
-                            requestCurrentSteps(gatt)
-                            delay(30_000)
-                        }
-                    }
+                    scope.launch { postAuthSetup(gatt) }
                 }
             }
 
-            Huami2021Chunked.ENDPOINT_AUTH, Huami2021Chunked.ENDPOINT_AUTH_ZEPPOS, Huami2021Chunked.ENDPOINT_AUTH_RESP -> {
+            Huami2021Chunked.ENDPOINT_AUTH,
+            Huami2021Chunked.ENDPOINT_AUTH_ZEPPOS -> {
                 scope.launch { handleAuth(gatt, payload) }
             }
+
             Huami2021Chunked.ENDPOINT_HEARTRATE -> {
                 if (payload.isNotEmpty() && payload[0] == 0x06.toByte()) {
                     parseSleep(payload)
@@ -311,103 +411,123 @@ class MiBand7Protocol(
                     parseChunkedHr(payload)
                 }
             }
+
             Huami2021Chunked.ENDPOINT_BATTERY -> {
-                Timber.d(
-                    "MiBand7: Got Battery endpoint data: ${
-                        payload.joinToString {
-                            it.toUByte().toString(16).padStart(2, '0')
-                        }
-                    }"
-                )
                 parseBattery(payload)
             }
 
-            Huami2021Chunked.ENDPOINT_STEPS, 0x0015.toShort() -> {
-                Timber.v(
-                    "MiBand7: Got Activity/Step data from endpoint 0x${endpoint.toString(16)}: ${
-                        payload.joinToString {
-                            it.toUByte().toString(16).padStart(2, '0')
-                        }
-                    }"
-                )
+            Huami2021Chunked.ENDPOINT_STEPS -> {
                 parseActivity(payload)
             }
-            Huami2021Chunked.ENDPOINT_SPO2      -> parseSpo2(payload)
-            Huami2021Chunked.ENDPOINT_DEVICE_INFO -> parseDeviceInfo(payload)
+
+            Huami2021Chunked.ENDPOINT_SPO2 -> {
+                parseSpo2(payload)
+            }
+
+            Huami2021Chunked.ENDPOINT_DEVICE_INFO -> {
+                Timber.i("MiBand7: device info  [%s]", payload.toHex())
+            }
+
             else -> {
-                Timber.d("MiBand7: Got data for unhandled endpoint 0x${endpoint.toString(16)}: ${payload.size} bytes")
+                Timber.d(
+                    "MiBand7: unhandled endpoint 0x%04x  (%d bytes)",
+                    endpoint.toInt() and 0xFFFF, payload.size
+                )
             }
         }
     }
 
+    // ── Auth response handler ─────────────────────────────────────────────────
+
     private suspend fun handleAuth(gatt: BluetoothGatt, payload: ByteArray) {
-        if (payload.isEmpty() || (payload[0] != Huami2021Chunked.AUTH_RESP_PREFIX)) return
+        if (payload.isEmpty() || payload[0] != Huami2021Chunked.AUTH_RESP_PREFIX) return
 
         when (payload[1]) {
             Huami2021Chunked.AUTH_CMD_PUB_KEY -> {
-                if (payload.size < 67) { // prefix, cmd, status, random(16), pub(48)
-                    Timber.e("MiBand7: short pubkey response"); failAuth(); return
+                // Band's public key response: [0x10][0x04][status][nonce:16][bandPub:48]
+                if (payload.size < 67) {
+                    Timber.e("MiBand7: public key response too short (%d bytes)", payload.size)
+                    failAuth(); return
                 }
                 if (payload[2] != Huami2021Chunked.AUTH_SUCCESS) {
-                    Timber.e("MiBand7: pubkey cmd failed (0x${payload[2].toUByte().toString(16)})"); failAuth(); return
+                    Timber.e(
+                        "MiBand7: public key exchange failed (status=0x%02x)",
+                        payload[2].toInt() and 0xFF
+                    )
+                    failAuth(); return
                 }
-                Timber.d("MiBand7: received band public key ✓")
 
                 try {
-                    val remoteRandom = payload.copyOfRange(3, 19)
-                    val remotePub = payload.copyOfRange(19, 67)
-                    val shared = ECDH_B163.generateShared(privateEC!!, remotePub) ?: throw Exception("ECDH failed")
+                    // The band can answer a stale/duplicated key request even when this
+                    // instance is not mid-handshake — never NPE on a missing private key.
+                    val priv = privateEC ?: run {
+                        Timber.e("MiBand7: auth response received but no handshake in progress — ignoring")
+                        return
+                    }
+                    val remoteNonce = payload.copyOfRange(3, 19)   // 16 bytes
+                    val remotePub = payload.copyOfRange(19, 67)  // 48 bytes
 
-                    // Initial encrypted sequence number is read from the first 4 bytes of shared secret
+                    val shared = ECDH_B163.generateShared(priv, remotePub)
+                        ?: throw Exception("ECDH shared-secret computation failed")
+
+                    // First 4 bytes of the shared secret seed the encrypted-sequence counter
                     pendingEncSeq = ByteBuffer.wrap(shared).order(ByteOrder.LITTLE_ENDIAN).int
 
-                    // Derive session key: shared[8..23] XOR authKey
-                    val sessionKey = ByteArray(16)
-                    val keyToUse = effectiveAuthKey
-                    for (i in 0 until 16) {
-                        sessionKey[i] = (shared[i + 8] xor keyToUse[i])
-                    }
+                    // Session key: shared[8..23] XOR authKey
+                    val sessionKey = ByteArray(16) { i -> (shared[i + 8] xor effectiveAuthKey[i]) }
                     pendingEncKey = sessionKey
 
-                    // Send encrypted random: [0x05][AES(key, rand)][AES(session, rand)]
-                    val enc1 = aesEcbEncrypt(keyToUse, remoteRandom)
-                    val enc2 = aesEcbEncrypt(sessionKey, remoteRandom)
+                    // Reply with double-encrypted nonces on the auth endpoint (0x0082)
+                    val enc1 = aesEcbEncrypt(effectiveAuthKey, remoteNonce)  // AES(authKey, nonce)
+                    val enc2 =
+                        aesEcbEncrypt(sessionKey, remoteNonce)        // AES(sessionKey, nonce)
                     val resp = byteArrayOf(Huami2021Chunked.AUTH_CMD_SESSION_KEY) + enc1 + enc2
-                    
+
                     writeChunked(gatt, Huami2021Chunked.ENDPOINT_AUTH, resp)
-                    Timber.d("MiBand7: sent double-encrypted nonces ✓")
+                    Timber.d("MiBand7: sent double-encrypted nonces")
                 } catch (e: Exception) {
-                    Timber.e(e, "MiBand7: auth derivation failed"); failAuth()
+                    Timber.e(e, "MiBand7: session key derivation failed")
+                    failAuth()
                 }
             }
 
             Huami2021Chunked.AUTH_CMD_SESSION_KEY -> {
-                val ok = (payload.size >= 3) && (payload[2] == Huami2021Chunked.AUTH_SUCCESS)
-                if (ok) {
-                    Timber.i("MiBand7: auth SUCCESS ✓")
+                // Auth result: [0x10][0x05][status]
+                val success = payload.size >= 3 && payload[2] == Huami2021Chunked.AUTH_SUCCESS
+                if (success) {
+                    Timber.i("MiBand7: authentication SUCCESS ✓")
                     isAuthenticated = true
                     decoder.sessionKey = pendingEncKey
                     encryptedSeq = pendingEncSeq
+
                     scope.launch {
                         _events.emit(DeviceEvent.DeviceReady)
-                        delay(600); requestBattery(gatt)
-                        delay(600); requestServices(gatt)
+                        // Small delay to let the band settle before issuing requests
+                        delay(600)
+                        requestBattery(gatt)
+                        delay(600)
+                        requestServices(gatt)
                     }
                 } else {
-                    val code = if (payload.size >= 3) payload[2].toUByte().toString(16) else "?"
-                    Timber.e("MiBand7: auth FAILED (0x$code)")
+                    val code = if (payload.size >= 3) payload[2].toInt() and 0xFF else -1
+                    if (code == 0x25) {
+                        Timber.e(
+                            "MiBand7: authentication FAILED — status 0x25: WRONG AUTH KEY. " +
+                                    "Re-extract the beaconkey for THIS band (matching its MAC) from the " +
+                                    "Xiaomi account it is actually paired with, and paste it in Settings."
+                        )
+                    } else {
+                        Timber.e("MiBand7: authentication FAILED (status=0x%02x)", code)
+                    }
                 }
-                authContinuation?.resume(ok)
+                authContinuation?.resume(success)
                 cleanupAuth()
             }
 
             else -> {
                 Timber.w(
-                    "MiBand7: unknown auth payload: ${
-                        payload.joinToString {
-                            it.toUByte().toString(16).padStart(2, '0')
-                        }
-                    }"
+                    "MiBand7: unknown auth command 0x%02x  [%s]",
+                    payload[1].toInt() and 0xFF, payload.toHex()
                 )
                 authContinuation?.resume(false)
                 cleanupAuth()
@@ -416,7 +536,7 @@ class MiBand7Protocol(
     }
 
     private fun failAuth() {
-        authContinuation?.resume(value = false)
+        authContinuation?.resume(false)
         cleanupAuth()
     }
 
@@ -426,90 +546,147 @@ class MiBand7Protocol(
         privateEC        = null
     }
 
-    // ── Parsers ───────────────────────────────────────────────────────
+    // ── Post-auth device setup ────────────────────────────────────────────────
 
-    private fun parseChunkedHr(p: ByteArray) {
-        if (p.size < 3) return
-        val bpm = p[2].toInt() and 0xFF
-        if (bpm in (30..250)) scope.launch { _events.emit(DeviceEvent.HeartRate(bpm)) }
-    }
+    /**
+     * Called once after the band sends its services list (endpoint 0x0001).
+     * Performs initial device configuration and starts the periodic polling loop.
+     */
+    private suspend fun postAuthSetup(gatt: BluetoothGatt) {
+        delay(2_000)
+        requestDeviceInfo(gatt)
+        delay(1_000)
+        syncTime(gatt)
+        delay(1_000)
+        enableRealtimeSteps(gatt)
 
-    private fun parseStdHr(data: ByteArray) {
-        if (data.size < 2) return
-        val flags = data[0].toInt() and 0xFF
-        val bpm = if (flags and 0x01 == 0) data[1].toInt() and 0xFF
-                  else ByteBuffer.wrap(data, 1, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xFFFF
-        if (bpm in (30..250)) scope.launch { _events.emit(DeviceEvent.HeartRate(bpm)) }
-    }
-
-    private fun parseBattery(p: ByteArray) {
-        if (p.isEmpty()) return
-        // ZeppOS battery reply: [0x04 or 0x10][?] [level] [status] ...
-        if (p[0].toInt() != 0x04 && p[0].toInt() != 0x10) return
-
-        val level = if (p.size >= 3) p[2].toInt() and 0xFF else return
-        val charging = p.size >= 4 && p[3].toInt() == 1
-        Timber.i(
-            "MiBand7: battery update -> $level%, charging=$charging (raw: ${
-                p.joinToString {
-                    it.toUByte().toString(16).padStart(2, '0')
-                }
-            })"
-        )
-        scope.launch { _events.emit(DeviceEvent.Battery(level, charging)) }
-    }
-
-    private fun parseActivity(p: ByteArray) {
-        if (p.isEmpty()) return
-
-        when (p[0].toInt()) {
-            0x07 -> { // Realtime notification
-                // Format: [0x07] [status] [steps:4] [dist:4] [cal:4] = 14 bytes
-                if (p.size < 14) return
-                val buf = ByteBuffer.wrap(p, 2, 12).order(ByteOrder.LITTLE_ENDIAN)
-                val steps = buf.int
-                val dist = buf.int
-                val cal = buf.int
-                Timber.d("MiBand7: activity notification -> steps=$steps, dist=$dist, kcal=$cal")
-                scope.launch { _events.emit(DeviceEvent.Steps(steps, cal, dist.toFloat())) }
-            }
-
-            0x04, 0x10 -> { // Reply to GET command (0x10 is standard for many Huami devices)
-                // Format: [0x04/0x10] [status] [?] [steps:4] [dist:4] [cal:4] = 15 bytes
-                // OR Format: [0x04/0x10] [?] [steps:4] [dist:4] [cal:4] = 14 bytes
-                val offset = if (p.size >= 15) 3 else 2
-                if (p.size < offset + 12) return
-                val buf = ByteBuffer.wrap(p, offset, 12).order(ByteOrder.LITTLE_ENDIAN)
-                val steps = buf.int
-                val dist = buf.int
-                val cal = buf.int
-                Timber.i("MiBand7: activity reply -> steps=$steps, dist=$dist, kcal=$cal")
-                scope.launch { _events.emit(DeviceEvent.Steps(steps, cal, dist.toFloat())) }
-            }
+        // Poll battery and steps periodically.  Battery is encrypted so it must be polled;
+        // steps are also polled as a fallback alongside real-time push notifications.
+        while (true) {
+            requestBattery(gatt)
+            delay(1_000)
+            requestCurrentSteps(gatt)
+            delay(30_000)
         }
     }
 
+    // ── Parsers ───────────────────────────────────────────────────────────────
+
+    /** Parse a chunked HR notification from the HEARTRATE endpoint. */
+    private fun parseChunkedHr(p: ByteArray) {
+        // Format: [CMD][sub-cmd][bpm]  (at least 3 bytes)
+        if (p.size < 3) return
+        val bpm = p[2].toInt() and 0xFF
+        if (bpm in 30..250) scope.launch { _events.emit(DeviceEvent.HeartRate(bpm)) }
+    }
+
+    /** Parse a standard GATT HR Measurement characteristic value. */
+    private fun parseStdHr(data: ByteArray) {
+        if (data.size < 2) return
+        val flags = data[0].toInt() and 0xFF
+        val bpm = if (flags and 0x01 == 0) {
+            data[1].toInt() and 0xFF  // 8-bit value
+        } else {
+            ByteBuffer.wrap(data, 1, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xFFFF
+        }
+        if (bpm in 30..250) scope.launch { _events.emit(DeviceEvent.HeartRate(bpm)) }
+    }
+
+    /**
+     * Parse a battery endpoint response.
+     *
+     * ZeppOS battery reply format (endpoint 0x0029, 21 bytes total):
+     * ```
+     * [CMD=0x04][?][LEVEL:1][STATUS:1][lastCharge: 2016-11-26 18:35][numCharges]
+     * [lastCharge: 2016-11-26 23:43:59][numCharges][chargeLevel]
+     * ```
+     * - `CMD`    = 0x04 (CMD_BATTERY_REPLY)
+     * - `LEVEL`  = battery percentage 0–100
+     * - `STATUS` = 0 (normal), 1 (charging), 3 (fully charged)
+     */
+    private fun parseBattery(p: ByteArray) {
+        if (p.size < 4) {
+            Timber.w("MiBand7: battery response too short (%d bytes)", p.size)
+            return
+        }
+        if (p[0].toInt() and 0xFF != 0x04) {
+            Timber.w("MiBand7: unexpected battery command 0x%02x", p[0].toInt() and 0xFF)
+            return
+        }
+        val level = p[2].toInt() and 0xFF
+        val status = p[3].toInt() and 0xFF
+        val charging = status == 1 || status == 3
+        Timber.i("MiBand7: battery → %d%% (status=%d)", level, status)
+        scope.launch { _events.emit(DeviceEvent.Battery(level, charging)) }
+    }
+
+    /**
+     * Parse a step / activity endpoint payload.
+     *
+     * The band carries two payload sub-types on endpoint 0x0016. In both, the step
+     * counter is a **uint16** at offset 1 of a 13-byte data block:
+     *
+     * **Real-time push notification (CMD=0x07), 14 bytes total:**
+     * ```
+     * [0x07][ data:13 ]   where data = [?][steps:2 LE][10 bytes]
+     * ```
+     * **Reply to an explicit step request (CMD=0x04), 15 bytes total:**
+     * ```
+     * [0x04][status][ data:13 ]   where data = [?][steps:2 LE][10 bytes]
+     * ```
+     * (Only the step count is defined by the protocol; distance/calories are not
+     * exposed here.)
+     */
+    private fun parseActivity(p: ByteArray) {
+        if (p.isEmpty()) return
+        val stepsOf: (ByteArray, Int) -> Int = { arr, base ->
+            (arr[base].toInt() and 0xFF) or ((arr[base + 1].toInt() and 0xFF) shl 8)
+        }
+        when (p[0].toInt() and 0xFF) {
+            0x07 -> {
+                // [0x07][13-byte block] → steps at block offset 1 = p[2..4)
+                if (p.size < 14) return
+                val steps = stepsOf(p, 2)
+                Timber.d("MiBand7: steps push → steps=%d", steps)
+                if (steps > 0) scope.launch { _events.emit(DeviceEvent.Steps(steps, 0, 0f)) }
+            }
+
+            0x04 -> {
+                // [0x04][status][13-byte block] → steps at block offset 1 = p[3..5)
+                if (p.size < 15) return
+                val steps = stepsOf(p, 3)
+                Timber.i("MiBand7: steps reply → steps=%d", steps)
+                if (steps > 0) scope.launch { _events.emit(DeviceEvent.Steps(steps, 0, 0f)) }
+            }
+
+            else -> Timber.v("MiBand7: ignoring activity sub-command 0x%02x", p[0].toInt() and 0xFF)
+        }
+    }
+
+    /** Parse an SpO₂ measurement result. */
     private fun parseSpo2(p: ByteArray) {
         if (p.size < 2 || p[0].toInt() and 0xFF != 0x01) return
         val v = p[1].toInt() and 0xFF
-        if (v in (50..100)) scope.launch { _events.emit(DeviceEvent.SpO2(v)) }
+        if (v in 50..100) scope.launch { _events.emit(DeviceEvent.SpO2(v)) }
     }
 
+    /**
+     * Parse a sleep-state event from the heart-rate endpoint (CMD=0x06).
+     * ZeppOS encodes sleep stage as: `[0x06][0x01=Asleep, 0x00=Awake]`.
+     */
     private fun parseSleep(p: ByteArray) {
         if (p.size < 2) return
-        // ZeppOS sleep event: [0x06] [0x01=Asleep, 0x00=Awake]
         val stage = when (p[1].toInt() and 0xFF) {
-            0x01 -> SleepStage.DEEP // Simplified
+            0x01 -> SleepStage.DEEP
             0x00 -> SleepStage.AWAKE
             else -> null
         } ?: return
         scope.launch { _events.emit(DeviceEvent.SleepData(stage)) }
     }
 
-    // ── Commands ──────────────────────────────────────────────────────
+    // ── Commands ──────────────────────────────────────────────────────────────
 
     override suspend fun vibrate(gatt: BluetoothGatt, pattern: VibratePattern) {
-        // ZeppOS Find Band: START=0x03, STOP=0x06
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x03))
         if (pattern == VibratePattern.SHORT || pattern == VibratePattern.DOUBLE) {
             delay(600)
@@ -518,72 +695,57 @@ class MiBand7Protocol(
     }
 
     override suspend fun setHeartRateMonitoring(gatt: BluetoothGatt, continuous: Boolean) {
-        // ZeppOS HR: SET=0x04, START=0x01, STOP=0x00
         val mode = if (continuous) 0x01.toByte() else 0x00.toByte()
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_HEARTRATE, byteArrayOf(0x04, mode))
     }
 
     override suspend fun syncTime(gatt: BluetoothGatt) {
-        val timestamp = Calendar.getInstance()
-        val zoneId = ZoneId.systemDefault()
-        val rules = zoneId.rules
+        val ts = Calendar.getInstance()
+        val rules = ZoneId.systemDefault().rules
+        val now = Instant.now()
 
         val p = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN).apply {
-            put(0x05.toByte()) // CMD_SET_TIME
-            putShort(timestamp.get(Calendar.YEAR).toShort())
-            put((timestamp.get(Calendar.MONTH) + 1).toByte())
-            put(timestamp.get(Calendar.DATE).toByte())
-            put(timestamp.get(Calendar.HOUR_OF_DAY).toByte())
-            put(timestamp.get(Calendar.MINUTE).toByte())
-            put(timestamp.get(Calendar.SECOND).toByte())
-            put((timestamp.get(Calendar.DAY_OF_WEEK) - 1).toByte())
-            put((timestamp.get(Calendar.MILLISECOND) / 1000.0 * 256.0).toInt().toByte())
-            if (rules.isDaylightSavings(Instant.now())) {
-                put(0x08.toByte())
-            } else {
-                put(0x00.toByte())
-            }
-            put((rules.getOffset(Instant.now()).totalSeconds / (60 * 15)).toByte())
+            put(0x05.toByte())                                                      // CMD_SET_TIME
+            putShort(ts.get(Calendar.YEAR).toShort())
+            put((ts.get(Calendar.MONTH) + 1).toByte())
+            put(ts.get(Calendar.DATE).toByte())
+            put(ts.get(Calendar.HOUR_OF_DAY).toByte())
+            put(ts.get(Calendar.MINUTE).toByte())
+            put(ts.get(Calendar.SECOND).toByte())
+            put((ts.get(Calendar.DAY_OF_WEEK) - 1).toByte())
+            put(
+                (ts.get(Calendar.MILLISECOND) / 1000.0 * 256.0).toInt().toByte()
+            )  // 1/256 s fractions
+            put(if (rules.isDaylightSavings(now)) 0x08.toByte() else 0x00.toByte())
+            put((rules.getOffset(now).totalSeconds / (60 * 15)).toByte())          // UTC offset in 15-min units
         }.array()
+
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_TIME, p)
     }
 
     override suspend fun requestBattery(gatt: BluetoothGatt) {
-        Timber.i("MiBand7: FORCE Requesting battery info…")
-        // ZeppOS Battery: REQUEST=0x03
+        Timber.d("MiBand7: requesting battery info…")
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_BATTERY, byteArrayOf(0x03))
     }
 
     private suspend fun requestServices(gatt: BluetoothGatt) {
-        Timber.d("MiBand7: Requesting services list…")
-        // ZeppOS Services: REQUEST=0x01
+        Timber.d("MiBand7: requesting services list…")
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_SERVICES, byteArrayOf(0x01))
     }
 
     private suspend fun requestDeviceInfo(gatt: BluetoothGatt) {
-        Timber.d("MiBand7: Requesting device info…")
-        // ZeppOS Device Info: REQUEST=0x01
+        Timber.d("MiBand7: requesting device info…")
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_DEVICE_INFO, byteArrayOf(0x01))
     }
 
     private suspend fun requestCurrentSteps(gatt: BluetoothGatt) {
-        Timber.d("MiBand7: Requesting current steps…")
+        Timber.d("MiBand7: requesting current steps…")
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_STEPS, byteArrayOf(0x03))
     }
 
     private suspend fun enableRealtimeSteps(gatt: BluetoothGatt) {
-        Timber.d("MiBand7: Enabling realtime steps…")
+        Timber.d("MiBand7: enabling real-time step notifications…")
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_STEPS, byteArrayOf(0x05, 0x01))
-    }
-
-    private fun parseDeviceInfo(p: ByteArray) {
-        Timber.i(
-            "MiBand7: Device Info -> ${
-                p.joinToString("") {
-                    it.toUByte().toString(16).padStart(2, '0')
-                }
-            }"
-        )
     }
 
     override suspend fun onSleepTrackingStarted(gatt: BluetoothGatt) {
@@ -603,79 +765,78 @@ class MiBand7Protocol(
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x00))
 
     override suspend fun setRawSensorEnabled(gatt: BluetoothGatt, enabled: Boolean) {
-        // Not implemented for Mi Band 7 (ZeppOS)
+        // Raw accelerometer access is not implemented in the ZeppOS chunked protocol for
+        // Mi Band 7.  Sleep as Android will operate in HR-only mode for sleep tracking.
+        Timber.d("MiBand7: setRawSensorEnabled($enabled) — not supported on this device")
     }
 
-    // ── BLE Write Helpers ─────────────────────────────────────────────
+    // ── Low-level BLE write helpers ───────────────────────────────────────────
 
+    /**
+     * Encodes [payload] for [endpoint] using [Huami2021Chunked.encode] and writes each packet
+     * to the chunked-write characteristic, honouring the [writeMutex] to serialise operations.
+     */
     private suspend fun writeChunked(gatt: BluetoothGatt, endpoint: Short, payload: ByteArray) =
         writeMutex.withLock {
             val char = chunkedWrite ?: return@withLock
-
             val handle = handleSeq++
-            Timber.d(
-                "MiBand7: writeChunked endpoint=0x${
-                    endpoint.toString(16).padStart(4, '0')
-                }, handle=$handle, size=${payload.size}"
-            )
 
-        val key =
-            if (isAuthenticated && Huami2021Chunked.isEncrypted(endpoint)) decoder.sessionKey else null
-
+            val key = if (isAuthenticated && Huami2021Chunked.isEncrypted(endpoint)) {
+                decoder.sessionKey
+            } else {
+                null
+            }
             val seq = if (key != null) encryptedSeq++ else 0
 
-        val packets = Huami2021Chunked.encode(
-            handle = handle,
-            endpoint = endpoint,
-            payload = payload,
-            mtu = negotiatedMtu,
-            sessionKey = key,
-            encryptedSeq = seq
-        )
-
-        val canWriteWithoutResponse =
-            (char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
-
-        for (packet in packets) {
-            Timber.v(
-                "MiBand7: writing packet to endpoint 0x${endpoint.toString(16)}: ${
-                    packet.joinToString {
-                        it.toUByte().toString(16).padStart(2, '0')
-                    }
-                }"
+            Timber.d(
+                "MiBand7: writeChunked endpoint=0x%04x handle=0x%02x len=%d encrypted=%s",
+                endpoint.toInt() and 0xFFFF, handle.toInt() and 0xFF, payload.size, key != null
             )
-            writeRaw(gatt, char, packet, noResponse = canWriteWithoutResponse)
-            if (packets.size > 1) delay(50) // Increased gap for stability
+
+            val packets = Huami2021Chunked.encode(
+                handle = handle,
+                endpoint = endpoint,
+                payload = payload,
+                mtu = negotiatedMtu,
+                sessionKey = key,
+                encryptedSeq = seq,
+            )
+
+            val noResponse =
+                (char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+
+            for ((idx, packet) in packets.withIndex()) {
+                Timber.v("MiBand7: write packet %d/%d  [%s]", idx + 1, packets.size, packet.toHex())
+                writeRaw(gatt, char, packet, noResponse = noResponse)
+                if (packets.size > 1) delay(50) // Pace multi-packet writes for BT stack stability
+            }
         }
-    }
 
     private suspend fun writeRaw(
-        gatt: BluetoothGatt, 
-        char: BluetoothGattCharacteristic?, 
-        data: ByteArray, 
-        noResponse: Boolean = false
+        gatt: BluetoothGatt,
+        char: BluetoothGattCharacteristic?,
+        data: ByteArray,
+        noResponse: Boolean = false,
     ) {
         if (char == null) return
-        val writeType = if (noResponse) BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE 
-                        else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        
+        val writeType = if (noResponse) BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val status = gatt.writeCharacteristic(char, data, writeType)
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                Timber.e("MiBand7: writeCharacteristic failed status=$status")
+                Timber.e("MiBand7: writeCharacteristic returned %d for %s", status, char.uuid)
             } else if (!noResponse) {
                 awaitCharacteristicWrite?.invoke()
             }
         } else {
+            @Suppress("DEPRECATION") char.value = data
+            @Suppress("DEPRECATION") char.writeType = writeType
             @Suppress("DEPRECATION")
-            char.value = data
-            @Suppress("DEPRECATION")
-            char.writeType = writeType
-            @Suppress("DEPRECATION")
-            if (gatt.writeCharacteristic(char) && !noResponse) {
-                awaitCharacteristicWrite?.invoke()
-            } else if (!noResponse) {
-                Timber.e("MiBand7: writeCharacteristic returned false")
+            if (gatt.writeCharacteristic(char)) {
+                if (!noResponse) awaitCharacteristicWrite?.invoke()
+            } else {
+                Timber.e("MiBand7: writeCharacteristic(legacy) returned false for %s", char.uuid)
             }
         }
     }
@@ -683,14 +844,13 @@ class MiBand7Protocol(
     private fun enableNotification(gatt: BluetoothGatt, char: BluetoothGattCharacteristic): Boolean {
         if (!gatt.setCharacteristicNotification(char, true)) return false
         val desc = char.getDescriptor(UUID_CCCD) ?: return false
-        
+
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothStatusCodes.SUCCESS
+            gatt.writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ==
+                    BluetoothStatusCodes.SUCCESS
         } else {
-            @Suppress("DEPRECATION")
-            desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            @Suppress("DEPRECATION")
-            gatt.writeDescriptor(desc)
+            @Suppress("DEPRECATION") desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            @Suppress("DEPRECATION") gatt.writeDescriptor(desc)
         }
     }
 
@@ -702,10 +862,14 @@ class MiBand7Protocol(
         }
 
     override fun destroy() {
-        authContinuation?.resume(value = false)
+        authContinuation?.resume(false)
         cleanupAuth()
         awaitDescriptorWrite = null
         awaitCharacteristicWrite = null
         scope.cancel()
     }
+
+    // ── Debug helpers ─────────────────────────────────────────────────────────
+
+    private fun ByteArray.toHex(): String = joinToString(" ") { "%02x".format(it.toInt() and 0xFF) }
 }

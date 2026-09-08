@@ -13,21 +13,38 @@ import timber.log.Timber
 import javax.inject.Inject
 
 /**
- * Bridges Sleep as Android events to the connected device.
+ * Bridges Sleep as Android broadcast events to the connected wearable device.
  *
- * Sleep as Android sends broadcast intents at key sleep events.
- * We intercept them and command the connected gadget accordingly:
+ * Sleep as Android sends directed broadcasts at key sleep lifecycle moments.  This receiver
+ * intercepts them and forwards the appropriate command to the band via [BleManager].
  *
- *  - SLEEP_TRACKING_STARTED: enable continuous HR, SpO2, accelerometer on the band
- *  - SLEEP_TRACKING_STOPPED: disable continuous monitoring
- *  - ALARM_ALERT_START: vibrate the band to wake the user
- *  - ALARM_ALERT_DISMISS: stop alarm vibration
- *  - ALARM_SNOOZE_CLICKED: stop vibration briefly
+ * ## Incoming broadcasts (Sleep as Android → OmniBand)
  *
- * Sleep as Android also supports sending actigraphic data back to it:
- * The app can send an intent with accelerometer data sampled from the band.
+ * ### Wearable API actions (`com.urbandroid.sleep.watch.*`)
+ * These are the preferred, explicit-companion-app actions documented at
+ * https://docs.sleep.urbandroid.org/devs/ble-device-api.html
  *
- * @see https://docs.sleep.urbandroid.org/devs/ble-device-api.html
+ * | Action                  | Effect                                              |
+ * |-------------------------|-----------------------------------------------------|
+ * | `START_TRACKING`        | Enable continuous HR + SpO₂ on the band             |
+ * | `STOP_TRACKING`         | Disable continuous monitoring                       |
+ * | `START_ALARM`           | Trigger alarm vibration on the band                 |
+ * | `STOP_ALARM`            | Stop alarm vibration                                |
+ * | `SET_SUSPENDED`         | Suspend/resume sensor streaming                     |
+ * | `SET_PAUSE`             | Pause/resume sensor streaming based on timestamp    |
+ * | `CHECK_CONNECTED`       | Reply with `CONFIRM_CONNECTED` broadcast            |
+ * | `HINT`                  | Short vibration hint on the band                   |
+ *
+ * ### Generic alarm-clock actions (`com.urbandroid.sleep.alarmclock.*`)
+ * Older broadcasts still used by some Sleep as Android versions.  They are handled
+ * identically to their Wearable API equivalents above.
+ *
+ * ## Reply broadcasts (OmniBand → Sleep as Android)
+ * Sent via [SleepAsAndroidSender]:
+ * - `CONFIRM_CONNECTED` — with `MAX_RAW_DATA` integer extra (required by the API)
+ * - `HR_DATA_UPDATE` — heart-rate samples (FloatArray) via `DATA` extra
+ * - `DATA_UPDATE` — actigraphy magnitudes (FloatArray) via `MAX_RAW_DATA` extra
+ *   *(not sent for Mi Band 7 — no raw accelerometer access in ZeppOS protocol)*
  */
 @AndroidEntryPoint
 class SleepAsAndroidReceiver : BroadcastReceiver() {
@@ -39,18 +56,7 @@ class SleepAsAndroidReceiver : BroadcastReceiver() {
     private val receiverScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     companion object {
-        // Sleep as Android broadcast actions (Generic)
-        const val ACTION_SLEEP_STARTED_GEN =
-            "com.urbandroid.sleep.alarmclock.SLEEP_TRACKING_STARTED"
-        const val ACTION_SLEEP_STOPPED_GEN =
-            "com.urbandroid.sleep.alarmclock.SLEEP_TRACKING_STOPPED"
-        const val ACTION_ALARM_START_GEN = "com.urbandroid.sleep.alarmclock.ALARM_ALERT_START"
-        const val ACTION_ALARM_DISMISS_GEN = "com.urbandroid.sleep.alarmclock.ALARM_ALERT_DISMISS"
-        const val ACTION_SNOOZE_CLICKED_GEN = "com.urbandroid.sleep.alarmclock.ALARM_SNOOZE_CLICKED"
-        const val ACTION_SNOOZE_CANCEL_GEN =
-            "com.urbandroid.sleep.alarmclock.ALARM_ALERT_SNOOZE_CANCELLED"
-
-        // Sleep as Android Wearable API actions
+        // ── Wearable API actions ───────────────────────────────────────────────
         const val ACTION_START_TRACKING = "com.urbandroid.sleep.watch.START_TRACKING"
         const val ACTION_STOP_TRACKING = "com.urbandroid.sleep.watch.STOP_TRACKING"
         const val ACTION_START_ALARM = "com.urbandroid.sleep.watch.START_ALARM"
@@ -60,42 +66,45 @@ class SleepAsAndroidReceiver : BroadcastReceiver() {
         const val ACTION_CHECK_CONNECTED = "com.urbandroid.sleep.watch.CHECK_CONNECTED"
         const val ACTION_HINT = "com.urbandroid.sleep.watch.HINT"
 
-        // We send this intent to Sleep as Android to push live actigraph data
-        const val ACTION_PUSH_ACTIGRAPH  = "com.urbandroid.sleep.watch.INTENT_WATCH_DATA"
-
-        /** Build intent to send actigraphy batch to Sleep as Android */
-        fun buildAcigraphIntent(values: FloatArray): Intent =
-            Intent(ACTION_PUSH_ACTIGRAPH).apply {
-                setPackage("com.urbandroid.sleep")
-                putExtra("com.urbandroid.sleep.watch.DATA", values)
-            }
+        // ── Generic alarm-clock actions (older Sleep as Android versions) ──────
+        const val ACTION_SLEEP_STARTED = "com.urbandroid.sleep.alarmclock.SLEEP_TRACKING_STARTED"
+        const val ACTION_SLEEP_STOPPED = "com.urbandroid.sleep.alarmclock.SLEEP_TRACKING_STOPPED"
+        const val ACTION_ALARM_START = "com.urbandroid.sleep.alarmclock.ALARM_ALERT_START"
+        const val ACTION_ALARM_DISMISS = "com.urbandroid.sleep.alarmclock.ALARM_ALERT_DISMISS"
+        const val ACTION_SNOOZE_CLICKED = "com.urbandroid.sleep.alarmclock.ALARM_SNOOZE_CLICKED"
+        const val ACTION_SNOOZE_CANCEL =
+            "com.urbandroid.sleep.alarmclock.ALARM_ALERT_SNOOZE_CANCELLED"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
-        Timber.i("SleepAsAndroidReceiver: received action=${intent.action}")
+        val action = intent.action ?: return
+        Timber.i("SleepAsAndroidReceiver: action=%s", action)
+
         receiverScope.launch {
-            when (intent.action) {
-                ACTION_SLEEP_STARTED_GEN, ACTION_START_TRACKING -> {
+            when (action) {
+                ACTION_START_TRACKING, ACTION_SLEEP_STARTED -> {
                     bleManager.onSleepTrackingStarted()
                 }
 
-                ACTION_SLEEP_STOPPED_GEN, ACTION_STOP_TRACKING -> {
+                ACTION_STOP_TRACKING, ACTION_SLEEP_STOPPED -> {
                     bleManager.onSleepTrackingStopped()
                 }
 
-                ACTION_ALARM_START_GEN, ACTION_START_ALARM -> {
+                ACTION_START_ALARM, ACTION_ALARM_START -> {
                     bleManager.triggerAlarm()
                 }
 
-                ACTION_ALARM_DISMISS_GEN, ACTION_STOP_ALARM -> {
+                ACTION_STOP_ALARM, ACTION_ALARM_DISMISS -> {
                     bleManager.dismissAlarm()
                 }
 
-                ACTION_SNOOZE_CLICKED_GEN -> {
+                ACTION_SNOOZE_CLICKED -> {
+                    // Snooze = stop current alarm vibration
                     bleManager.dismissAlarm()
                 }
 
-                ACTION_SNOOZE_CANCEL_GEN -> {
+                ACTION_SNOOZE_CANCEL -> {
+                    // Snooze cancelled = resume alarm vibration
                     bleManager.triggerAlarm()
                 }
 
@@ -106,62 +115,24 @@ class SleepAsAndroidReceiver : BroadcastReceiver() {
                 }
 
                 ACTION_SET_PAUSE -> {
-                    val pauseTimestamp = intent.getLongExtra("TIMESTAMP", 0L)
-                    val isPaused = pauseTimestamp > System.currentTimeMillis()
-                    bleManager.setRawSensorEnabled(!isPaused)
-                    bleManager.setHeartRateMonitoring(!isPaused)
+                    // TIMESTAMP is the epoch millis when the pause ends (0 = not paused)
+                    val pauseUntil = intent.getLongExtra("TIMESTAMP", 0L)
+                    val paused = pauseUntil > System.currentTimeMillis()
+                    bleManager.setRawSensorEnabled(!paused)
+                    bleManager.setHeartRateMonitoring(!paused)
                 }
 
                 ACTION_CHECK_CONNECTED -> {
+                    // Reply with CONFIRM_CONNECTED including the required MAX_RAW_DATA extra.
+                    // Without this extra Sleep as Android connects but never requests data.
                     sleepAsAndroidSender.confirmConnected()
                 }
 
                 ACTION_HINT -> {
+                    // Short vibration hint from the Sleep as Android UI
                     bleManager.vibrate()
                 }
             }
         }
     }
-}
-
-/**
- * Helper to send actigraphy data back to Sleep as Android.
- *
- * The band's accelerometer gives us movement data.
- * We buffer several seconds of samples then send them to Sleep as Android
- * so it can improve its sleep stage detection with wearable motion data.
- *
- * Values should be in units of "g" (gravitational acceleration).
- * Sleep as Android expects them at 1Hz sampling rate.
- */
-class SleepAsAndroidBridge(private val context: Context) {
-
-    private val actigraphBuffer = mutableListOf<Float>()
-
-    fun addAccelerometerSample(x: Float, y: Float, z: Float) {
-        // Compute vector magnitude as actigraphy value
-        val magnitude = Math.sqrt((x * x + y * y + z * z).toDouble()).toFloat()
-        actigraphBuffer.add(magnitude)
-
-        // Send in batches of 20 samples (20 seconds at 1Hz)
-        if (actigraphBuffer.size >= 20) {
-            flushToSleepAsAndroid()
-        }
-    }
-
-    private fun flushToSleepAsAndroid() {
-        if (actigraphBuffer.isEmpty()) return
-        val values = actigraphBuffer.toFloatArray()
-        actigraphBuffer.clear()
-
-        try {
-            val intent = SleepAsAndroidReceiver.buildAcigraphIntent(values)
-            context.sendBroadcast(intent)
-            Timber.d("SleepAsAndroidBridge: sent ${values.size} actigraphy samples")
-        } catch (e: Exception) {
-            Timber.e(e, "SleepAsAndroidBridge: failed to send actigraphy data")
-        }
-    }
-
-    fun flush() = flushToSleepAsAndroid()
 }

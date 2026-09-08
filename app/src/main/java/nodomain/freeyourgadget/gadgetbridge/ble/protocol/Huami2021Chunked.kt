@@ -1,6 +1,7 @@
 package nodomain.freeyourgadget.gadgetbridge.ble.protocol
 
 import android.annotation.SuppressLint
+import nodomain.freeyourgadget.gadgetbridge.ble.protocol.Huami2021Chunked.ENDPOINT_AUTH
 import timber.log.Timber
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -9,28 +10,118 @@ import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Huami 2021 Chunked Transfer Protocol (ZeppOS)
- * ============================================
- * Used by Xiaomi Smart Band 7.
+ * Huami 2021 Extended Header / Chunked Transfer Protocol (ZeppOS)
+ * ==============================================================
+ * Used by Xiaomi Smart Band 7 and later ZeppOS devices.
+ *
+ * Each logical message is split into one or more BLE packets of at most (MTU − 3) bytes.
+ *
+ * ## Packet layout
+ *
+ * **First packet (11-byte header):**
+ * ```
+ * [0x03][flags:1][0x00][handle:1][count:1][origLen:4 LE][endpoint:2 LE][payload chunk...]
+ * ```
+ *
+ * **Continuation packets (5-byte header):**
+ * ```
+ * [0x03][flags:1][0x00][handle:1][count:1][payload chunk...]
+ * ```
+ *
+ * **Flags (bitfield):**
+ * | Bit | Meaning          |
+ * |-----|-----------------|
+ * | 0   | First packet    |
+ * | 1   | Last packet     |
+ * | 2   | Needs ACK       |
+ * | 3   | Payload is AES-encrypted |
+ *
+ * ## Encryption
+ * When `flags & 0x08` is set the payload is AES-128/ECB encrypted.
+ * The per-message key is: `messageKey[i] = sessionKey[i] XOR handle`.
+ * The plaintext block is: `payload | encryptedSeq(4 LE) | CRC32(payload|seq)(4 LE)`,
+ * zero-padded to the next 16-byte AES-block boundary before encryption.
+ *
+ * ## ACK format (phone → band, written to the *write* characteristic 0x0016)
+ * ```
+ * [0x04][0x00][handle:1][0x01][count:1]
+ * ```
  */
 object Huami2021Chunked {
 
-    // ── Endpoints ────────────────────────────────────────────────────
+    // ── Endpoints ─────────────────────────────────────────────────────────────
+
+    /** Service / capability list exchange. */
     const val ENDPOINT_SERVICES: Short = 0x0001.toShort()
-    const val ENDPOINT_AUTH         : Short = 0x0082.toShort()
+
+    /**
+     * ZeppOS ECDH key-exchange endpoint (0x0002).
+     * Historically documented as the phone's public-key destination, but working
+     * ZeppOS implementations (Gadgetbridge) send the initial key to [ENDPOINT_AUTH]
+     * (0x0082); writes to 0x0002 get ACKed without triggering the exchange.
+     */
     const val ENDPOINT_AUTH_ZEPPOS: Short = 0x0002.toShort()
-    const val ENDPOINT_AUTH_RESP: Short = 0x0082.toShort()
-    const val ENDPOINT_FIND_DEVICE  : Short = 0x001a.toShort()
-    const val ENDPOINT_HEARTRATE    : Short = 0x001d.toShort()
-    const val ENDPOINT_BATTERY: Short = 0x0021.toShort()
+
+    /**
+     * Authentication response endpoint (0x0082).
+     * The band replies with its public key + nonce here.
+     * The phone then sends double-encrypted nonces back on this same endpoint.
+     */
+    const val ENDPOINT_AUTH: Short = 0x0082.toShort()
+
+    /** "Find my device" vibration control. */
+    const val ENDPOINT_FIND_DEVICE: Short = 0x001a.toShort()
+
+    /** Heart-rate measurement and monitoring control. */
+    const val ENDPOINT_HEARTRATE: Short = 0x001d.toShort()
+
+    /**
+     * Battery level and charging state (encrypted).
+     */
+    const val ENDPOINT_BATTERY: Short = 0x0029.toShort()
+
+    /** Time synchronisation. */
     const val ENDPOINT_TIME: Short = 0x0047.toShort()
+
+    /** Real-time step / activity counters. */
     const val ENDPOINT_STEPS: Short = 0x0016.toShort()
+
+    /** Historical activity data fetch. */
     const val ENDPOINT_ACTIVITY_FETCH: Short = 0x004b.toShort()
-    const val ENDPOINT_SPO2         : Short = 0x0045.toShort()
+
+    /** Blood-oxygen (SpO₂) measurement control. */
+    const val ENDPOINT_SPO2: Short = 0x0045.toShort()
+
+    /** Static device information (firmware version, hardware revision, …). */
     const val ENDPOINT_DEVICE_INFO: Short = 0x0043.toShort()
+
+    /** Device configuration (display items, DND schedule, …). */
     const val ENDPOINT_CONFIG: Short = 0x002d.toShort()
+
+    /** User profile (height, weight, date-of-birth, gender). */
     const val ENDPOINT_USER_INFO: Short = 0x0022.toShort()
 
+    // ── Authentication command / status bytes ─────────────────────────────────
+
+    /** Command: phone sends its B-163 EC public key. */
+    const val AUTH_CMD_PUB_KEY: Byte = 0x04
+
+    /** Command: phone sends the double-encrypted nonces. */
+    const val AUTH_CMD_SESSION_KEY: Byte = 0x05
+
+    /** First byte of every auth response from the band. */
+    const val AUTH_RESP_PREFIX: Byte = 0x10
+
+    /** Status byte indicating a successful operation (second byte of most responses). */
+    const val AUTH_SUCCESS: Byte = 0x01
+
+    // ── Encryption endpoint list ──────────────────────────────────────────────
+
+    /**
+     * Returns `true` for endpoints whose payloads must be AES-128/ECB encrypted once a
+     * session key has been established.  Unencrypted endpoints (steps, HR push events,
+     * device-info) can be received before authentication is complete.
+     */
     fun isEncrypted(endpoint: Short): Boolean = when (endpoint) {
         ENDPOINT_BATTERY,
         ENDPOINT_ACTIVITY_FETCH,
@@ -38,48 +129,51 @@ object Huami2021Chunked {
         ENDPOINT_FIND_DEVICE,
         ENDPOINT_USER_INFO,
         0x0023.toShort(), // Workout
-        0x003e.toShort(), // Connection
-        0x0018.toShort(), // Notification
-        0x0031.toShort(), // Assistant 1
-        0x004c.toShort(), // Assistant 2
-        0x0042.toShort(), // Shortcut Cards
-        0x0019.toShort(), // Watchface
-        0x003c.toShort(), // Vibration Patterns
-        0x0040.toShort(), // Display Items
-        0x003f.toShort(), // Silent Mode
-        0x0041.toShort(), // World Clocks
-        0x0044.toShort(), // HTTP
+        0x003e.toShort(), // Connection parameters
+        0x0018.toShort(), // Notification mirroring
+        0x0031.toShort(), // Voice assistant (1)
+        0x004c.toShort(), // Voice assistant (2)
+        0x0042.toShort(), // Shortcut cards
+        0x0019.toShort(), // Watch-face management
+        0x003c.toShort(), // Vibration patterns
+        0x0040.toShort(), // Display item ordering
+        0x003f.toShort(), // Silent mode
+        0x0041.toShort(), // World clocks
+        0x0044.toShort(), // HTTP proxy
         0x0046.toShort(), // Contacts
-        0x0049.toShort(), // Voice Memos
+        0x0049.toShort(), // Voice memos
         0x004d.toShort(), // Maps
-        0x0033.toShort(), // WiFi
-        0x0034.toShort()  // FTP Server
+        0x0033.toShort(), // Wi-Fi
+        0x0034.toShort()  // FTP server
             -> true
 
         else -> false
     }
 
-    // ── Auth constants ──────────────────────────────────────────────
-    const val AUTH_CMD_PUB_KEY      : Byte = 0x04
-    const val AUTH_CMD_SESSION_KEY  : Byte = 0x05
-    const val AUTH_RESP_PREFIX: Byte = 0x10
-    const val AUTH_SUCCESS          : Byte = 0x01
+    // ── Message ───────────────────────────────────────────────────────────────
 
+    /**
+     * A fully reassembled and (if encrypted) decrypted logical message.
+     *
+     * @param endpoint  Service endpoint this message belongs to.
+     * @param payload   Decrypted application payload bytes.
+     * @param handle    Handle byte from the chunked header (echoed in ACKs).
+     * @param count     Count byte from the final chunk (echoed in ACKs).
+     */
     data class Message(
         val endpoint: Short,
         val payload: ByteArray,
         val handle: Byte,
-        val count: Byte
+        val count: Byte,
     ) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (javaClass != other?.javaClass) return false
             other as Message
-            if (endpoint != other.endpoint) return false
-            if (!payload.contentEquals(other.payload)) return false
-            if (handle != other.handle) return false
-            if (count != other.count) return false
-            return true
+            return endpoint == other.endpoint &&
+                    payload.contentEquals(other.payload) &&
+                    handle == other.handle &&
+                    count == other.count
         }
 
         override fun hashCode(): Int {
@@ -91,8 +185,22 @@ object Huami2021Chunked {
         }
     }
 
+    // ── Encoder ───────────────────────────────────────────────────────────────
+
     /**
-     * Encode a message using the 2021 Extended Header format.
+     * Encodes [payload] into one or more BLE packets using the 2021 extended header format.
+     *
+     * If [sessionKey] is non-null the payload is encrypted with AES-128/ECB.  The per-message
+     * key is derived as `sessionKey[i] XOR handle`.  A 4-byte little-endian [encryptedSeq] and
+     * a 4-byte CRC32 are appended to the plaintext before encryption.
+     *
+     * @param handle        Monotonically increasing handle byte (phone's outgoing counter).
+     * @param endpoint      Destination service endpoint.
+     * @param payload       Raw (unencrypted) application payload.
+     * @param mtu           Negotiated ATT MTU in bytes (default 23).
+     * @param sessionKey    16-byte session key, or null for unencrypted messages.
+     * @param encryptedSeq  Sequence number embedded in the ciphertext (prevents replay).
+     * @return              Ordered list of BLE packets ready to write to the device.
      */
     fun encode(
         handle: Byte,
@@ -100,95 +208,121 @@ object Huami2021Chunked {
         payload: ByteArray,
         mtu: Int = 23,
         sessionKey: ByteArray? = null,
-        encryptedSeq: Int = 0
+        encryptedSeq: Int = 0,
     ): List<ByteArray> {
         val packets = mutableListOf<ByteArray>()
-
         val encrypt = sessionKey != null
-        val dataToSend: ByteArray
         val originalLength = payload.size
 
-        if (encrypt) {
-            val messageKey =
-                ByteArray(16) { i -> (sessionKey!![i].toInt() xor (handle.toInt() and 0xFF)).toByte() }
+        val dataToSend: ByteArray = if (encrypt) {
+            val messageKey = ByteArray(16) { i ->
+                (sessionKey!![i].toInt() xor (handle.toInt() and 0xFF)).toByte()
+            }
 
-            // Prepare payload for encryption: data + seq(4) + crc(4)
-            var encryptedLen = originalLength + 8
-            val overflow = encryptedLen % 16
-            if (overflow > 0) encryptedLen += (16 - overflow)
+            // Plaintext block: payload | seq(4 LE) | CRC32(payload|seq)(4 LE), padded to 16n
+            var blockLen = originalLength + 8
+            val overflow = blockLen % 16
+            if (overflow > 0) blockLen += 16 - overflow
 
-            val encryptable = ByteArray(encryptedLen)
-            System.arraycopy(payload, 0, encryptable, 0, originalLength)
-
-            ByteBuffer.wrap(encryptable, originalLength, 4).order(ByteOrder.LITTLE_ENDIAN)
+            val block = ByteArray(blockLen)
+            System.arraycopy(payload, 0, block, 0, originalLength)
+            ByteBuffer.wrap(block, originalLength, 4).order(ByteOrder.LITTLE_ENDIAN)
                 .putInt(encryptedSeq)
 
-            val crc = CRC32()
-            crc.update(encryptable, 0, originalLength + 4)
-            ByteBuffer.wrap(encryptable, originalLength + 4, 4).order(ByteOrder.LITTLE_ENDIAN)
+            val crc = CRC32().also { it.update(block, 0, originalLength + 4) }
+            ByteBuffer.wrap(block, originalLength + 4, 4).order(ByteOrder.LITTLE_ENDIAN)
                 .putInt(crc.value.toInt())
 
-            dataToSend = aesEcbEncrypt(messageKey, encryptable)
+            aesEcbEncrypt(messageKey, block)
         } else {
-            dataToSend = payload
+            payload
         }
 
+        // ATT overhead is 3 bytes; the remaining budget goes to the GATT payload.
+        val effectiveMtu = mtu - 3
         var offset = 0
         var count: Byte = 0
-        var headerSize = 11
-        val effectiveMtu = mtu - 3 // ATT header is 3 bytes
+        var headerSize = 11  // First-packet header
 
         while (offset < dataToSend.size) {
-            val isFirst = (offset == 0)
+            val isFirst = offset == 0
             val chunkSize = minOf(dataToSend.size - offset, effectiveMtu - headerSize)
-            val isLast = (offset + chunkSize >= dataToSend.size)
+            val isLast = offset + chunkSize >= dataToSend.size
 
-            // Flags: 0x01=First, 0x02=Last, 0x04=NeedsAck, 0x08=Encrypted
             var flags = 0
             if (isFirst) flags = flags or 0x01
-            if (isLast) flags = flags or 0x02 or 0x04
+            if (isLast) flags = flags or 0x02 or 0x04   // Last always needs ACK
             if (encrypt) flags = flags or 0x08
 
             val packet = ByteBuffer.allocate(headerSize + chunkSize)
-                .order(ByteOrder.LITTLE_ENDIAN).apply {
-                    put(0x03.toByte())
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .apply {
+                    put(0x03.toByte())         // Packet type / magic
                     put(flags.toByte())
-                    put(0x00.toByte()) // Padding
+                    put(0x00.toByte())          // Reserved
                     put(handle)
                     put(count)
                     if (isFirst) {
-                        putInt(originalLength) // Header contains UNENCRYPTED length
+                        putInt(originalLength)  // Unencrypted length for decoder buffer allocation
                         putShort(endpoint)
                     }
                     put(dataToSend, offset, chunkSize)
                 }.array()
-            
+
             packets.add(packet)
             offset += chunkSize
             count++
-            headerSize = 5 // Continuation header size
+            headerSize = 5  // Continuation-packet header
         }
         return packets
     }
 
+    // ── Decoder ───────────────────────────────────────────────────────────────
+
+    /**
+     * Stateful decoder that reassembles multi-packet chunked messages.
+     *
+     * A single instance should be used for the entire BLE session.  Call [decode] for every
+     * notification received on the chunked-read characteristic (UUID 0x0017).
+     *
+     * **Not thread-safe** — call from a single coroutine/thread.
+     */
     class Decoder {
+
+        /**
+         * AES-128 session key.  Must be set once authentication completes; until then
+         * encrypted messages cannot be decoded and will be discarded.
+         */
         @Volatile
         var sessionKey: ByteArray? = null
-        
+
         private var currentHandle: Byte? = null
         private var lastCount: Int = -1
         private var currentEndpoint: Short = 0
-        private var currentLength: Int = 0 // Original unencrypted length
+        private var currentLength: Int = 0
         private var buffer: ByteBuffer? = null
         private var isEncryptedMessage = false
 
+        /**
+         * Result of processing one raw BLE notification.
+         *
+         * @param message   Fully reassembled message, or null when more packets are needed.
+         * @param needsAck  Whether the phone must send an ACK to the band.
+         * @param handle    Handle byte to echo in the ACK.
+         * @param count     Count byte to echo in the ACK.
+         */
         data class DecodeResult(
             val message: Message?,
             val needsAck: Boolean,
             val handle: Byte,
-            val count: Byte
+            val count: Byte,
         )
 
+        /**
+         * Process one raw BLE notification from the chunked-read characteristic.
+         *
+         * @return [DecodeResult] describing the outcome, or null if [data] is malformed.
+         */
         fun decode(data: ByteArray): DecodeResult? {
             if (data.size < 5 || data[0] != 0x03.toByte()) return null
 
@@ -204,83 +338,79 @@ object Huami2021Chunked {
             if (isFirst) {
                 reset()
                 if (data.size < 11) return null
-                currentLength = ByteBuffer.wrap(data, 5, 4).order(ByteOrder.LITTLE_ENDIAN).int
 
-                if (currentLength < 0 || currentLength > 1024 * 1024) {
-                    Timber.e("Invalid Huami 2021 length: $currentLength")
+                currentLength = ByteBuffer.wrap(data, 5, 4).order(ByteOrder.LITTLE_ENDIAN).int
+                if (currentLength < 0 || currentLength > 1_048_576) {
+                    Timber.e("Huami2021: implausible payload length %d — discarding", currentLength)
                     return null
                 }
 
-                var allocLength = currentLength
-                if (encrypted) {
-                    var encLen = currentLength + 8
-                    val overflow = encLen % 16
-                    if (overflow > 0) encLen += (16 - overflow)
-                    allocLength = encLen
+                // Pre-allocate buffer for the entire (possibly padded) ciphertext
+                val allocLen = if (encrypted) {
+                    var enc = currentLength + 8
+                    val r = enc % 16
+                    if (r > 0) enc += 16 - r
+                    enc
+                } else {
+                    currentLength
                 }
 
                 currentEndpoint = ByteBuffer.wrap(data, 9, 2).order(ByteOrder.LITTLE_ENDIAN).short
                 currentHandle = handle
                 lastCount = count.toInt() and 0xFF
                 isEncryptedMessage = encrypted
-                buffer = ByteBuffer.allocate(allocLength)
+                buffer = ByteBuffer.allocate(allocLen)
                 offset = 11
             } else {
                 if (handle != currentHandle || buffer == null) return null
                 val c = count.toInt() and 0xFF
                 if (c <= lastCount) {
-                    // Ignore duplicate or out-of-order chunk
+                    // Duplicate or out-of-order chunk — acknowledge but don't advance state.
                     return DecodeResult(null, needsAck, handle, count)
                 }
                 lastCount = c
             }
 
-            val payloadSize = data.size - offset
-            if (payloadSize > 0) {
-                if (buffer!!.remaining() < payloadSize) {
-                    val newSize = buffer!!.capacity() + maxOf(payloadSize, 128)
-                    val newBuffer = ByteBuffer.allocate(newSize)
+            val chunkSize = data.size - offset
+            if (chunkSize > 0) {
+                if (buffer!!.remaining() < chunkSize) {
+                    // Grow buffer if a size estimate was wrong (should be rare)
+                    val grown = ByteBuffer.allocate(buffer!!.capacity() + maxOf(chunkSize, 128))
                     buffer!!.flip()
-                    newBuffer.put(buffer!!)
-                    buffer = newBuffer
+                    grown.put(buffer!!)
+                    buffer = grown
                 }
-                buffer!!.put(data, offset, payloadSize)
+                buffer!!.put(data, offset, chunkSize)
             }
 
             var resultMsg: Message? = null
             if (isLast) {
                 try {
                     var payload = buffer!!.array().copyOf(buffer!!.position())
+
                     if (isEncryptedMessage) {
                         val key = sessionKey
                         if (key == null) {
                             Timber.e(
-                                "MiBand7: Decrypt fail - session key missing for 0x${
-                                    currentEndpoint.toString(
-                                        16
-                                    )
-                                }"
+                                "Huami2021: cannot decrypt endpoint 0x%04x — session key not set yet",
+                                currentEndpoint.toInt() and 0xFFFF,
                             )
+                            reset()
                             return null
                         }
-                        val messageKey =
-                            ByteArray(16) { i -> (key[i].toInt() xor (handle.toInt() and 0xFF)).toByte() }
-                        try {
-                            val decrypted = aesEcbDecrypt(messageKey, payload)
-                            payload = decrypted.copyOf(currentLength)
-                        } catch (e: Exception) {
-                            Timber.e(
-                                e,
-                                "Huami 2021 decryption failed for endpoint 0x${
-                                    currentEndpoint.toString(16).padStart(4, '0')
-                                }"
-                            )
-                            throw e
+                        val messageKey = ByteArray(16) { i ->
+                            (key[i].toInt() xor (handle.toInt() and 0xFF)).toByte()
                         }
+                        val decrypted = aesEcbDecrypt(messageKey, payload)
+                        payload = decrypted.copyOf(currentLength) // Strip seq + CRC padding
                     }
+
                     resultMsg = Message(currentEndpoint, payload, handle, count)
                 } catch (e: Exception) {
-                    Timber.e(e, "Huami 2021 decode error")
+                    Timber.e(
+                        e, "Huami2021: decode error for endpoint 0x%04x",
+                        currentEndpoint.toInt() and 0xFFFF
+                    )
                 }
                 reset()
             }
@@ -297,6 +427,8 @@ object Huami2021Chunked {
             isEncryptedMessage = false
         }
     }
+
+    // ── AES helpers ───────────────────────────────────────────────────────────
 
     @SuppressLint("GetInstance")
     private fun aesEcbEncrypt(key: ByteArray, data: ByteArray): ByteArray =

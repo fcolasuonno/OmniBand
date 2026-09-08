@@ -1,5 +1,6 @@
 package nodomain.freeyourgadget.gadgetbridge.ui.viewmodel
 
+import android.app.Application
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -30,6 +31,7 @@ import nodomain.freeyourgadget.gadgetbridge.data.db.entity.StepsEntity
 import nodomain.freeyourgadget.gadgetbridge.data.repository.DeviceRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.HealthRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.UserPreferencesRepository
+import nodomain.freeyourgadget.gadgetbridge.service.DeviceService
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -134,7 +136,8 @@ class DashboardViewModel @Inject constructor(
 class ScanViewModel @Inject constructor(
     private val bleManager: BleManager,
     private val deviceRepository: DeviceRepository,
-    private val prefs: UserPreferencesRepository
+    private val prefs: UserPreferencesRepository,
+    private val app: Application
 ) : ViewModel() {
 
     val scannedDevices: StateFlow<List<ScannedDevice>> = bleManager.scannedDevices
@@ -151,6 +154,9 @@ class ScanViewModel @Inject constructor(
             prefs.saveActiveDevice(device.address, type.name)
             if (authKey != null) prefs.saveAuthKey(authKey)
 
+            // Bring up the foreground service (permissions were already granted on the scan
+            // screen) so the connection survives process death and backgrounding.
+            app.startForegroundService(DeviceService.startIntent(app))
             bleManager.connect(device.address, type, authKey)
         }
     }

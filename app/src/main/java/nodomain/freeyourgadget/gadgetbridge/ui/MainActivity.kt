@@ -1,5 +1,8 @@
 package nodomain.freeyourgadget.gadgetbridge.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -18,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.core.content.ContextCompat
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -44,8 +48,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Start the foreground service as soon as the app opens
-        startForegroundService(DeviceService.startIntent(this))
+        // Start the foreground service only once BLE runtime permissions are granted,
+        // otherwise startForeground(connectedDevice) throws SecurityException on API 31+.
+        // The service is started later from ScanViewModel after permissions are granted.
+        if (hasBlePermissions()) {
+            startForegroundService(DeviceService.startIntent(this))
+        }
 
         setContent {
             OmniBandTheme {
@@ -53,6 +61,20 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    private fun hasBlePermissions(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+                .all {
+                    ContextCompat.checkSelfPermission(
+                        this,
+                        it
+                    ) == PackageManager.PERMISSION_GRANTED
+                }
+        } else {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                    PackageManager.PERMISSION_GRANTED
+        }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
