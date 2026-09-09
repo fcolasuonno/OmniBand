@@ -336,7 +336,7 @@ checksum = XOR of bytes[1..4+N]
 
 ## Sleep as Android Integration
 
-Full spec: https://docs.sleep.urbandroid.org/devs/ble-device-api.html
+Full spec: https://sleep.urbandroid.org/docs/devs/wearable_api.html
 
 ### Incoming broadcasts (Sleep as Android → OmniBand)
 
@@ -374,20 +374,21 @@ Intent("com.urbandroid.sleep.watch.HR_DATA_UPDATE").apply {
 }
 ```
 
-#### Actigraphy data *(not available on Mi Band 7)*
+#### Actigraphy data
 ```kotlin
 Intent("com.urbandroid.sleep.watch.DATA_UPDATE").apply {
     setPackage("com.urbandroid.sleep")
     putExtra(
         "MAX_RAW_DATA",
-        floatArrayOf(0.12f, 0.08f, …
-    ))  // FloatArray of |xyz| magnitudes at 1 Hz
+        floatArrayOf(9.81f, 9.83f, …
+    ))  // FloatArray of |xyz| magnitudes (g units), 10 s aggregation windows
 }
 ```
 
-> The Mi Band 7 ZeppOS protocol does not expose raw accelerometer data. Sleep as Android
-> will use HR-only sleep staging.  `DATA_UPDATE` is implemented in `SleepAsAndroidSender`
-> for future use should accelerometer access become available.
+> Raw accelerometer streaming comes from the classic `0x0002` characteristic
+> (started/stopped with sleep tracking; re-enabled every 10 s). Samples are
+> max-aggregated per 10 s window Gadgetbridge-style; when the stream is off, the
+> resting baseline (≈ 1 g) is reported so the channel never goes silent.
 
 ---
 
@@ -449,8 +450,9 @@ BleManager.deviceEvents  ←── SharedFlow (replay=1)
 
 - **Mi Band 7 auth key**: Must be extracted externally via
   [xiaomi-cloud-tokens-extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor).
-- **Mi Band 7 accelerometer**: ZeppOS does not expose raw sensor data over the chunked BLE
-  protocol; Sleep as Android therefore operates in HR-only sleep-staging mode.
+- **Mi Band 7 accelerometer**: raw sensor streams over the classic `0x0002`
+  characteristic (not the chunked protocol) during sleep tracking; the resting
+  baseline is reported when the stream is off.
 - **Sony WF-1000XM5 A2DP/HFP**: Handled by Android's system BT stack; OmniBand only
   controls the BLE configuration channel.
 - **GATT error 133**: Fully mitigated at the application level but ultimately inherent to

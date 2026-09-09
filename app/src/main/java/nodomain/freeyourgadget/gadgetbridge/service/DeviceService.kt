@@ -232,8 +232,8 @@ class DeviceService : LifecycleService() {
                 healthRepository.saveSpO2(address, event.percent)
 
             is DeviceEvent.RawAccelerometer -> {
-                // Mi Band 7 never emits this event (ZeppOS has no raw sensor access).
-                // Kept for future protocol support and Sony WF-1000XM5 motion detection.
+                // Raw accelerometer samples (Mi Band classic 0x0002 stream, active during
+                // sleep tracking). Forwarded as actigraphy magnitudes when enabled below.
                 if (sleepEnabled) {
                     val magnitude = sqrt(
                         (event.x * event.x + event.y * event.y + event.z * event.z).toDouble()

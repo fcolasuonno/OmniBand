@@ -71,7 +71,8 @@ interface DeviceProtocol {
     /**
      * Enable or disable raw sensor data streaming (accelerometer).
      *
-     * Note: Mi Band 7 / ZeppOS does not support this — the method is a no-op for that device.
+     * On ZeppOS this starts/stops accelerometer notifications on the classic
+     * `0x0002` characteristic (see `MiBand7Protocol.parseRawSensorData`).
      * Implementations for other devices (future or community-contributed) may use it to
      * stream 1 Hz actigraphy data required by Sleep as Android.
      */

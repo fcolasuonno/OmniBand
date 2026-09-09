@@ -3,7 +3,14 @@ package nodomain.freeyourgadget.gadgetbridge.service
 import android.content.Context
 import android.content.Intent
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import nodomain.freeyourgadget.gadgetbridge.service.SleepAsAndroidSender.Companion.ACTION_CONFIRM
+import nodomain.freeyourgadget.gadgetbridge.service.SleepAsAndroidSender.Companion.STILLNESS_BASELINE_MS2
 import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -14,7 +21,7 @@ import javax.inject.Singleton
  * ## Sleep as Android BLE Companion API
  *
  * Sleep as Android communicates with companion apps using directed broadcasts.  The full
- * API spec is at https://docs.sleep.urbandroid.org/devs/ble-device-api.html
+ * API spec is at https://sleep.urbandroid.org/docs/devs/wearable_api.html
  *
  * ### Data the companion app sends to Sleep as Android
  *
@@ -24,11 +31,10 @@ import javax.inject.Singleton
  * | `com.urbandroid.sleep.watch.HR_DATA_UPDATE`   | `DATA`         | FloatArray | Heart-rate samples (BPM)  |
  * | `com.urbandroid.sleep.watch.CONFIRM_CONNECTED`| `MAX_RAW_DATA` | Int        | **Required** batch size   |
  *
- * ### Actigraphy note for Mi Band 7
- * The Mi Band 7 / ZeppOS does not expose raw accelerometer data over the chunked BLE
- * protocol, so actigraphy (`DATA_UPDATE`) will never be sent.  Sleep as Android will fall
- * back to HR-only sleep-stage detection, which is less accurate but still functional.
- * Future firmware or protocol updates may enable raw sensor access.
+ * ### Actigraphy source
+ * Raw accelerometer streaming (classic `0x0002` characteristic, enabled during
+ * sleep tracking) feeds real movement magnitudes; when the stream is off, the
+ * resting baseline (≈ 1 g) is reported so Sleep as Android always has a signal.
  */
 @Singleton
 class SleepAsAndroidSender @Inject constructor(
@@ -57,17 +63,40 @@ class SleepAsAndroidSender @Inject constructor(
          * Number of actigraphy samples per batch.
          * Sent with [ACTION_CONFIRM] so Sleep as Android knows when to expect a flush.
          * Also controls the size of the local movement buffer before it is flushed.
+         * Updated at runtime from `SET_BATCH_SIZE` (`SIZE` extra).
          */
-        private const val ACTIGRAPHY_BATCH_SIZE = 20
+        private var actigraphyBatchSize = 20
 
         /** Minimum interval between HR batch flushes (10 seconds). */
         private const val HR_BATCH_INTERVAL_MS = 10_000L
+
+        /** Actigraphy aggregation tick (spec: aggregate per 10-second intervals). */
+        private const val MOVEMENT_TICK_MS = 10_000L
+
+        /**
+         * Stillness baseline: raw accelerometer magnitude at rest ≈ 1 g.
+         *
+         * Gadgetbridge sends `sqrt(x²+y²+z²)` raw (gravity included), which reads ~9.8
+         * when still — a real sensor physically never reports 0.0 (that is free-fall).
+         * Sending 0.0 marks the data as no-sensor/invalid downstream, so stillness
+         * MUST be reported as ~9.8 for Sleep as Android to accept the stream.
+         */
+        private const val STILLNESS_BASELINE_MS2 = 9.8f
     }
 
     // Guarded by `this` — accessed from IO coroutines handling device events
     private val hrBuffer = mutableListOf<Float>()
     private val movementBuffer = mutableListOf<Float>()
     private var lastHrFlushMs = 0L
+
+    // Raw-accelerometer aggregation window (Gadgetbridge pattern): the strongest
+    // magnitude seen since the last tick. Falls back to stillness when the band
+    // streams nothing (stream off / unsupported device).
+    private var rawWindowMax = 0f
+    private var rawWindowSeen = false
+
+    private val senderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var movementTicker: Job? = null
 
     /**
      * Buffer a heart-rate sample and flush the batch to Sleep as Android every 10 seconds
@@ -87,18 +116,87 @@ class SleepAsAndroidSender @Inject constructor(
     /**
      * Buffer an actigraphy magnitude value and flush when the batch is full.
      *
-     * @param magnitude Vector magnitude of the accelerometer reading (units of g).
+     * Real accelerometer samples (Mi Band raw-sensor stream) only update the current
+     * 10-second aggregation window — the window maximum is what gets batched, exactly
+     * like Gadgetbridge aggregates `maxRawData`. This keeps high-rate sensor traffic
+     * (tens of samples/sec) from spamming one broadcast per sample.
      *
-     * **Note:** The Mi Band 7 does not expose raw accelerometer data, so this method is
-     * never called for that device.  It is provided for future protocol support.
+     * @param magnitude Vector magnitude of the accelerometer reading (units of g).
      */
     fun onMovementData(magnitude: Float) {
         synchronized(this) {
-            movementBuffer.add(magnitude)
-            if (movementBuffer.size >= ACTIGRAPHY_BATCH_SIZE) {
-                flushMovementBatch()
+            if (!rawWindowSeen || magnitude > rawWindowMax) {
+                rawWindowMax = magnitude
+                rawWindowSeen = true
             }
         }
+    }
+
+    /**
+     * Start the stillness ticker: every 10 s (per spec aggregation interval) the
+     * window maximum is batched — real accelerometer data when the band streams it,
+     * [STILLNESS_BASELINE_MS2] otherwise ("no measurable movement").
+     *
+     * Why the fallback matters: without ANY `DATA_UPDATE`, Sleep as Android keeps
+     * shrinking the requested batch and never engages its tracking loop (observed:
+     * `batchSize 12 → 1 → 12 …` with an empty screen). The fallback value is the
+     * physically-correct resting baseline (raw magnitude ≈ 1 g, as Gadgetbridge
+     * sends when still) — never 0.0, which reads as no-sensor/invalid downstream.
+     * HR — the other real signal here — then drives staging.
+     */
+    fun startMovementTicker() {
+        synchronized(this) {
+            if (movementTicker?.isActive == true) return
+            // Bootstrap: one immediate sample so the stream opens without waiting
+            // a full batch period.
+            movementBuffer.add(STILLNESS_BASELINE_MS2)
+            flushMovementBatch()
+            movementTicker = senderScope.launch {
+                while (true) {
+                    delay(MOVEMENT_TICK_MS)
+                    tickMovement()
+                }
+            }
+        }
+        Timber.i("SleepAsAndroidSender: movement ticker started")
+    }
+
+    /** Fold the current aggregation window into the batch. */
+    private fun tickMovement() {
+        synchronized(this) {
+            val value = if (rawWindowSeen) rawWindowMax else STILLNESS_BASELINE_MS2
+            rawWindowMax = 0f
+            rawWindowSeen = false
+            movementBuffer.add(value)
+            if (movementBuffer.size >= actigraphyBatchSize) flushMovementBatch()
+        }
+    }
+
+    fun stopMovementTicker() {
+        synchronized(this) {
+            movementTicker?.cancel()
+            movementTicker = null
+            if (movementBuffer.isNotEmpty()) flushMovementBatch()
+        }
+        Timber.i("SleepAsAndroidSender: movement ticker stopped")
+    }
+
+    /** Honor Sleep as Android's requested actigraphy batch size (`SET_BATCH_SIZE`). */
+    fun setActigraphyBatchSize(size: Long) {
+        synchronized(this) {
+            actigraphyBatchSize = size.coerceIn(1, 120).toInt()
+            // A mid-batch SIZE change would otherwise flush a wrong-sized batch, which
+            // Sleep as Android flags ("unexpected batch size"). The buffered samples are
+            // zeros, so dropping the partial batch loses no information.
+            if (movementBuffer.isNotEmpty()) {
+                Timber.d(
+                    "SleepAsAndroidSender: dropping %d buffered sample(s) on batch-size change",
+                    movementBuffer.size
+                )
+                movementBuffer.clear()
+            }
+        }
+        Timber.d("SleepAsAndroidSender: actigraphy batch size → %d", actigraphyBatchSize)
     }
 
     // ── Flush helpers (must be called under `synchronized(this)`) ─────────────
@@ -147,12 +245,12 @@ class SleepAsAndroidSender @Inject constructor(
     fun confirmConnected() {
         val intent = Intent(ACTION_CONFIRM).apply {
             setPackage(PACKAGE_SLEEP)
-            putExtra(EXTRA_MAX_RAW_DATA, ACTIGRAPHY_BATCH_SIZE)
+            putExtra(EXTRA_MAX_RAW_DATA, actigraphyBatchSize)
         }
         context.sendBroadcast(intent)
         Timber.i(
             "SleepAsAndroidSender: sent CONFIRM_CONNECTED (batchSize=%d)",
-            ACTIGRAPHY_BATCH_SIZE
+            actigraphyBatchSize
         )
     }
 

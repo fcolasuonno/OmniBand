@@ -10,6 +10,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -117,6 +118,26 @@ class MiBand7Protocol(
         val UUID_CHAR_ACTIVITY_DATA: UUID =
             UUID.fromString("00000005-0000-3512-2118-0009af100700")
 
+        /** Raw sensor control characteristic (classic writes start/stop streaming). */
+        val UUID_CHAR_RAW_SENSOR_CONTROL: UUID =
+            UUID.fromString("00000001-0000-3512-2118-0009af100700")
+
+        /** Raw sensor data characteristic (accelerometer notifications). */
+        val UUID_CHAR_RAW_SENSOR_DATA: UUID =
+            UUID.fromString("00000002-0000-3512-2118-0009af100700")
+
+        /** Start streaming: the band replies `10:01:03:05`. */
+        private val RAW_SENSOR_START_1 = byteArrayOf(0x01, 0x03, 0x19)
+
+        /** Start streaming (part 2): the band replies `10:01:01:05`. */
+        private val RAW_SENSOR_START_2 = byteArrayOf(0x01, 0x03, 0x00, 0x00, 0x00, 0x19)
+
+        /** Start streaming (part 3): the band replies `10:02:01`. */
+        private val RAW_SENSOR_START_3 = byteArrayOf(0x02)
+
+        /** Stop streaming: the band replies `10:03:01`. */
+        private val RAW_SENSOR_STOP = byteArrayOf(0x03)
+
         /** How long to wait for the ECDH handshake to complete before giving up. */
         private const val AUTH_TIMEOUT_MS = 30_000L
 
@@ -146,7 +167,18 @@ class MiBand7Protocol(
     private var hrChar: BluetoothGattCharacteristic? = null
     private var activityControl: BluetoothGattCharacteristic? = null
     private var activityData: BluetoothGattCharacteristic? = null
+    private var rawSensorControl: BluetoothGattCharacteristic? = null
+    private var rawSensorData: BluetoothGattCharacteristic? = null
     private var sessionGatt: BluetoothGatt? = null
+
+    /** True while raw accelerometer streaming is requested (re-enabled every 10 s). */
+    @Volatile
+    private var rawSensorStreaming = false
+    private var rawSensorJob: Job? = null
+
+    /** One-shot flag for logging the first raw packet of a session. */
+    @Volatile
+    private var rawStreamLogged = false
 
     private val decoder = Huami2021Chunked.Decoder()
 
@@ -226,6 +258,7 @@ class MiBand7Protocol(
         this.awaitDescriptorWrite = awaitDescriptorWrite
         this.awaitCharacteristicWrite = awaitCharacteristicWrite
         sessionGatt = gatt
+        rawStreamLogged = false
 
         Timber.i("MiBand7: initializing ${gatt.device.address} (MTU=$negotiatedMtu)")
 
@@ -236,7 +269,16 @@ class MiBand7Protocol(
             if (activityControl == null) activityControl =
                 svc.getCharacteristic(UUID_CHAR_ACTIVITY_CONTROL)
             if (activityData == null) activityData = svc.getCharacteristic(UUID_CHAR_ACTIVITY_DATA)
+            if (rawSensorControl == null) rawSensorControl =
+                svc.getCharacteristic(UUID_CHAR_RAW_SENSOR_CONTROL)
+            if (rawSensorData == null) rawSensorData =
+                svc.getCharacteristic(UUID_CHAR_RAW_SENSOR_DATA)
         }
+        Timber.i(
+            "MiBand7: characteristics rawCtl=%s rawData=%s actCtl=%s actData=%s",
+            rawSensorControl != null, rawSensorData != null,
+            activityControl != null, activityData != null
+        )
         hrChar = gatt.getService(UUID_SERVICE_HR)?.getCharacteristic(UUID_CHAR_HR_MEASUREMENT)
         val stdBatteryChar = gatt.getService(UUID_SERVICE_STD_BATTERY)
             ?.getCharacteristic(UUID_CHAR_STD_BATTERY)
@@ -287,6 +329,21 @@ class MiBand7Protocol(
             }
         }
         activityData?.let {
+            if (enableNotification(gatt, it)) {
+                awaitDescriptorWrite()
+                delay(200)
+            }
+        }
+
+        // Subscribe to raw accelerometer data (Sleep as Android actigraphy path).
+        // Streaming itself is started/stopped via setRawSensorEnabled().
+        rawSensorControl?.let {
+            if (enableNotification(gatt, it)) {
+                awaitDescriptorWrite()
+                delay(200)
+            }
+        }
+        rawSensorData?.let {
             if (enableNotification(gatt, it)) {
                 awaitDescriptorWrite()
                 delay(200)
@@ -424,6 +481,17 @@ class MiBand7Protocol(
             UUID_CHAR_ACTIVITY_DATA -> {
                 // Fetch bulk data: raw [counter][payload…] frames, no chunk header
                 handleFetchData(value)
+                true
+            }
+
+            UUID_CHAR_RAW_SENSOR_CONTROL -> {
+                // Replies to start/stop streaming (e.g. [0x10, 0x01, …]) — informational
+                Timber.d("MiBand7: raw sensor control ← [%s]", value.toHex())
+                true
+            }
+
+            UUID_CHAR_RAW_SENSOR_DATA -> {
+                parseRawSensorData(value)
                 true
             }
 
@@ -916,13 +984,11 @@ class MiBand7Protocol(
             // Chunked path (encrypted once authenticated)
             writeChunked(g, Huami2021Chunked.ENDPOINT_ACTIVITY_FETCH, payload)
         } else {
-            // Classic path: raw write to the activity-control characteristic (WWR).
+            // Classic path: raw write to the activity-control characteristic.
             // Used when the band does not advertise the 0x004b chunked fetch service.
             val char =
                 activityControl ?: throw IllegalStateException("no activity-control characteristic")
-            writeMutex.withLock {
-                writeRaw(g, char, payload, noResponse = true)
-            }
+            writeClassic(g, char, payload)
         }
     }
 
@@ -1283,6 +1349,54 @@ class MiBand7Protocol(
     }
 
     /**
+     * Parse raw accelerometer data from the classic `0x0002` characteristic.
+     *
+     * Type `0x00`: `[0x00][index][x:2s][y:2s][z:2s]…` (6 bytes per sample, int16
+     * little-endian). Raw values span roughly ±4100 for ±1 g, so each axis is
+     * scaled as `g = raw * -9.81 / 4100` (Gadgetbridge scale factors).
+     * Every sample is emitted as [DeviceEvent.RawAccelerometer] for actigraphy.
+     */
+    private fun parseRawSensorData(value: ByteArray) {
+        if (value.size < 2) return
+        if (!rawStreamLogged) {
+            rawStreamLogged = true
+            Timber.i("MiBand7: raw accelerometer stream live (%d bytes first packet)", value.size)
+        }
+        when (value[0].toInt() and 0xFF) {
+            0x00 -> {
+                if ((value.size - 2) % 6 != 0) {
+                    Timber.w(
+                        "MiBand7: raw sensor type-0 length not divisible by 6 (%d)",
+                        value.size
+                    )
+                    return
+                }
+                var o = 2
+                while (o + 6 <= value.size) {
+                    val x = (((value[o + 1].toInt() and 0xFF) shl 8) or (value[o].toInt() and 0xFF))
+                    val xi = if (x >= 0x8000) x - 0x10000 else x
+                    val y =
+                        (((value[o + 3].toInt() and 0xFF) shl 8) or (value[o + 2].toInt() and 0xFF))
+                    val yi = if (y >= 0x8000) y - 0x10000 else y
+                    val z =
+                        (((value[o + 5].toInt() and 0xFF) shl 8) or (value[o + 4].toInt() and 0xFF))
+                    val zi = if (z >= 0x8000) z - 0x10000 else z
+                    val gx = (xi * -9.81f) / 4100f
+                    val gy = (yi * -9.81f) / 4100f
+                    val gz = (zi * -9.81f) / 4100f
+                    scope.launch { _events.emit(DeviceEvent.RawAccelerometer(gx, gy, gz)) }
+                    o += 6
+                }
+            }
+
+            else -> Timber.v(
+                "MiBand7: ignoring raw sensor type 0x%02x (%d bytes)",
+                value[0].toInt() and 0xFF, value.size
+            )
+        }
+    }
+
+    /**
      * Parse a sleep-state event from the heart-rate endpoint (CMD=0x06).
      * ZeppOS encodes only the transition: `[0x06][0x01=fell asleep, 0x00=woke up]`.
      * Sleep onset is recorded as LIGHT (the band does not report depth here).
@@ -1393,6 +1507,7 @@ class MiBand7Protocol(
     override suspend fun onSleepTrackingStarted(gatt: BluetoothGatt) {
         setHeartRateMonitoring(gatt, continuous = true)
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_SPO2, byteArrayOf(0x01, 0x01))
+        setRawSensorEnabled(gatt, enabled = true)
     }
 
     override suspend fun onSleepTrackingStopped(gatt: BluetoothGatt) {
@@ -1400,6 +1515,7 @@ class MiBand7Protocol(
         // loop owns it while connected; stopping here would blank the dashboard after
         // every sleep session. Only SpO2 (sleep-specific) is switched off.
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_SPO2, byteArrayOf(0x01, 0x00))
+        setRawSensorEnabled(gatt, enabled = false)
     }
 
     override suspend fun triggerAlarm(gatt: BluetoothGatt) =
@@ -1409,9 +1525,68 @@ class MiBand7Protocol(
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x00))
 
     override suspend fun setRawSensorEnabled(gatt: BluetoothGatt, enabled: Boolean) {
-        // Raw accelerometer access is not implemented in the ZeppOS chunked protocol for
-        // Mi Band 7.  Sleep as Android will operate in HR-only mode for sleep tracking.
-        Timber.d("MiBand7: setRawSensorEnabled($enabled) — not supported on this device")
+        rawSensorStreaming = enabled
+        if (enabled) {
+            Timber.i("MiBand7: starting raw accelerometer streaming")
+            sendRawSensorStart(gatt)
+            // The band drops the stream after a while — re-enable every 10 s
+            // (Gadgetbridge pattern) while streaming is requested.
+            if (rawSensorJob?.isActive != true) {
+                rawSensorJob = scope.launch {
+                    while (true) {
+                        delay(10_000)
+                        if (!rawSensorStreaming) break
+                        sendRawSensorStart(gatt)
+                    }
+                }
+            }
+        } else {
+            Timber.i("MiBand7: stopping raw accelerometer streaming")
+            rawSensorJob?.cancel()
+            rawSensorJob = null
+            val control = rawSensorControl
+            if (control == null) {
+                Timber.w("MiBand7: no raw-sensor control characteristic found")
+                return
+            }
+            writeClassic(gatt, control, RAW_SENSOR_STOP)
+        }
+    }
+
+    private suspend fun sendRawSensorStart(gatt: BluetoothGatt) {
+        val control = rawSensorControl
+        if (control == null) {
+            Timber.w("MiBand7: no raw-sensor control characteristic found")
+            return
+        }
+        writeClassic(gatt, control, RAW_SENSOR_START_1)
+        delay(200)
+        writeClassic(gatt, control, RAW_SENSOR_START_2)
+        delay(200)
+        writeClassic(gatt, control, RAW_SENSOR_START_3)
+    }
+
+    /**
+     * Write to a classic (non-chunked) characteristic, choosing the write type from
+     * the characteristic's advertised properties — mirroring Gadgetbridge, which
+     * uses with-response writes unless the characteristic is WWR-only. Hardcoding
+     * the wrong type gets the write silently dropped by the stack/band.
+     */
+    private suspend fun writeClassic(
+        gatt: BluetoothGatt,
+        char: BluetoothGattCharacteristic,
+        data: ByteArray,
+    ) {
+        val props = char.properties
+        val noResponse = (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0 &&
+                (props and BluetoothGattCharacteristic.PROPERTY_WRITE) == 0
+        Timber.d(
+            "MiBand7: classic write %s noResponse=%s [%s]",
+            char.uuid, noResponse, data.toHex()
+        )
+        writeMutex.withLock {
+            writeRaw(gatt, char, data, noResponse = noResponse)
+        }
     }
 
     // ── Low-level BLE write helpers ───────────────────────────────────────────
