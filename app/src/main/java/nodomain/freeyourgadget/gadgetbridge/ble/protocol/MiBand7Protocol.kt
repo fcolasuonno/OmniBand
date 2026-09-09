@@ -434,9 +434,8 @@ class MiBand7Protocol(
     /**
      * Send a chunked-transfer ACK to the band.
      *
-     * **Bug fix:** ACKs must be written to the *write* characteristic (0x0016), not the
-     * notify characteristic (0x0017).  The notify characteristic is read-only from the
-     * phone's perspective; writing to it would silently fail on most Android stacks.
+     * ACKs go to the *read* characteristic (0x0017), which supports
+     * write-without-response — matching Gadgetbridge on this device family.
      *
      * ACK format: `[0x04][0x00][handle][0x01][count]`
      */
@@ -448,8 +447,8 @@ class MiBand7Protocol(
         )
         val ack = byteArrayOf(0x04, 0x00, handle, 0x01, count)
         scope.launch {
-            // Write to chunkedWrite (0x0016) — the phone→band channel
-            writeRaw(gatt, chunkedWrite, ack, noResponse = true)
+            // Write to chunkedRead (0x0017) — the band's ACK listener
+            writeRaw(gatt, chunkedRead, ack, noResponse = true)
         }
     }
 

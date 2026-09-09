@@ -317,7 +317,8 @@ object Huami2021Chunked {
         }
 
         // ATT overhead is 3 bytes; the remaining budget goes to the GATT payload.
-        val effectiveMtu = mtu - 3
+        // Capped like Gadgetbridge: MTU floor 23, payload ceiling 512.
+        val effectiveMtu = minOf(512, maxOf(23, mtu) - 3)
         var offset = 0
         var count: Byte = 0
         var headerSize = 11  // First-packet header

@@ -183,7 +183,7 @@ Continuation  (5-byte header):
 
 flags: bit0=First  bit1=Last  bit2=NeedsAck  bit3=Encrypted
 
-ACK (phone→band, written to chunkedWrite / 0x0016):
+ACK (phone→band, written to chunkedRead / 0x0017):
   [0x04][0x00][handle][0x01][count]
 ```
 

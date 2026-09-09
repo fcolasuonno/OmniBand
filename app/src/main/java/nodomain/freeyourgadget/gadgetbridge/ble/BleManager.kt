@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import nodomain.freeyourgadget.gadgetbridge.ble.BleManager.Companion.MAX_INIT_FAILURES
 import nodomain.freeyourgadget.gadgetbridge.ble.protocol.DeviceEvent
 import nodomain.freeyourgadget.gadgetbridge.ble.protocol.DeviceProtocol
 import nodomain.freeyourgadget.gadgetbridge.ble.protocol.MiBand7Protocol
@@ -126,6 +127,17 @@ class BleManager @Inject constructor(
     private val initLock = Any()
     @Volatile
     private var initializingGatt: BluetoothGatt? = null
+
+    /**
+     * Consecutive protocol-init failures (auth rejected, handshake timeout, …).
+     * After [MAX_INIT_FAILURES] we stop retrying — otherwise a wrong auth key
+     * would reconnect-loop forever, draining the battery on both sides.
+     */
+    private var consecutiveInitFailures = 0
+
+    companion object {
+        const val MAX_INIT_FAILURES = 3
+    }
 
     /**
      * One-shot channels that carry GATT operation completions from the callback thread to the
@@ -223,6 +235,7 @@ class BleManager @Inject constructor(
         storedAuthKey    = authKey
 
         reconnectionManager.stop()
+        consecutiveInitFailures = 0
         _connectionState.value = ConnectionState.Connecting(address, deviceType)
         managerScope.launch { connectToDevice(device) }
     }
@@ -423,15 +436,35 @@ class BleManager @Inject constructor(
                     )
 
                     if (success) {
+                        consecutiveInitFailures = 0
                         _connectionState.value =
                             ConnectionState.Connected(gatt.device.address, targetDeviceType!!)
                         Timber.i("BleManager: device fully initialized ✓")
                         // Step back to BALANCED priority — HIGH drains battery
                         launch { delay(2_000); gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED) }
                     } else {
-                        Timber.e("BleManager: protocol initialization failed")
-                        _connectionState.value = ConnectionState.Error("Protocol init failed")
-                        closeGatt()
+                        consecutiveInitFailures++
+                        if (consecutiveInitFailures >= MAX_INIT_FAILURES) {
+                            Timber.e(
+                                "BleManager: protocol initialization failed %d times in a row — " +
+                                        "giving up (check the auth key)",
+                                consecutiveInitFailures
+                            )
+                            reconnectionManager.stop()
+                            _connectionState.value =
+                                ConnectionState.Error("Protocol init failed — check auth key")
+                            closeGatt()
+                        } else {
+                            Timber.w(
+                                "BleManager: protocol initialization failed (%d/%d) — retrying",
+                                consecutiveInitFailures, MAX_INIT_FAILURES
+                            )
+                            _connectionState.value = ConnectionState.Reconnecting(
+                                gatt.device.address, targetDeviceType!!, consecutiveInitFailures
+                            )
+                            closeGatt()
+                            reconnectionManager.start(managerScope)
+                        }
                     }
                 } finally {
                     synchronized(initLock) {
