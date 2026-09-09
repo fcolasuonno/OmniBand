@@ -154,6 +154,20 @@ fun DashboardScreen(
                         listOf(Color(0xFF2196F3).copy(alpha = 0.15f), Color.Transparent)
                     )
                 )
+                // ---- Stress Card ----
+                MetricCard(
+                    modifier = Modifier.weight(1f),
+                    icon = Icons.Filled.Spa,
+                    iconColor = Color(0xFF9C27B0),
+                    label = "Stress",
+                    value = lastStress?.score?.let { "$it" } ?: "--",
+                    unit = lastStress?.let { s ->
+                        stressLevelLabel(s.score) + "\n" + ageAgo(s.timestamp)
+                    } ?: "/100",
+                    gradient = Brush.verticalGradient(
+                        listOf(Color(0xFF9C27B0).copy(alpha = 0.15f), Color.Transparent)
+                    )
+                )
             }
 
             // ---- Steps Progress Card ----
@@ -162,21 +176,6 @@ fun DashboardScreen(
                 goal = stepGoal,
                 calories = todaySteps?.calories ?: 0,
                 distanceMeters = todaySteps?.distanceMeters ?: 0f
-            )
-
-            // ---- Stress Card ----
-            MetricCard(
-                modifier = Modifier.fillMaxWidth(),
-                icon = Icons.Filled.Spa,
-                iconColor = Color(0xFF9C27B0),
-                label = "Stress",
-                value = lastStress?.score?.let { "$it" } ?: "--",
-                unit = lastStress?.let { s ->
-                    stressLevelLabel(s.score) + " · " + ageAgo(s.timestamp)
-                } ?: "/100",
-                gradient = Brush.verticalGradient(
-                    listOf(Color(0xFF9C27B0).copy(alpha = 0.15f), Color.Transparent)
-                )
             )
 
             // ---- Heart Rate mini-chart (last 20 readings) ----
@@ -316,9 +315,9 @@ fun MetricCard(
 // ---------------------------------------------------------------------------
 
 private fun stressLevelLabel(score: Int): String = when (score) {
-    in 0..39 -> "relaxed"
+    in 0..39 -> "rel"
     in 40..59 -> "mild"
-    in 60..79 -> "moderate"
+    in 60..79 -> "mod"
     else -> "high"
 }
 
