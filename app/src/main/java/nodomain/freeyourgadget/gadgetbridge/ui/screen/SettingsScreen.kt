@@ -64,6 +64,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
     val autoReconnect       by viewModel.autoReconnect.collectAsStateWithLifecycle()
     val sleepAndroid        by viewModel.sleepAsAndroidEnabled.collectAsStateWithLifecycle()
     val stepGoal            by viewModel.dailyStepGoal.collectAsStateWithLifecycle()
+    val disableIdleAlert by viewModel.disableIdleAlert.collectAsStateWithLifecycle()
     val savedDevices        by viewModel.savedDevices.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
@@ -205,6 +206,18 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                     }
                 }
             }
+        }
+
+        // ── Device ─────────────────────────────────────────────────────
+        SectionHeader(Icons.Filled.FitnessCenter, "Device")
+        SettingsCard {
+            SettingsToggleRow(
+                icon = Icons.AutoMirrored.Filled.DirectionsWalk,
+                title = "Disable Idle Alert",
+                subtitle = "Stop the band's inactivity reminder vibrations",
+                checked = disableIdleAlert,
+                onCheckedChange = { viewModel.setDisabledIdleAlert(it) }
+            )
         }
 
         // ── Fitness Goals ───────────────────────────────────────────

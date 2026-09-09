@@ -570,6 +570,10 @@ class BleManager @Inject constructor(
         activeGatt?.let { activeProtocol?.syncTime(it) }
     }
 
+    suspend fun setInactivityWarnings(enabled: Boolean) {
+        activeGatt?.let { activeProtocol?.setInactivityWarnings(it, enabled) }
+    }
+
     suspend fun requestBattery() {
         activeGatt?.let { activeProtocol?.requestBattery(it) }
     }

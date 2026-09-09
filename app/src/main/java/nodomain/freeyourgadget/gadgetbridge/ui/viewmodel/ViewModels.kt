@@ -216,6 +216,9 @@ class SettingsViewModel @Inject constructor(
     val dailyStepGoal: StateFlow<Int> = prefs.dailyStepGoal
         .stateIn(viewModelScope, SharingStarted.Eagerly, 8000)
 
+    val disableIdleAlert: StateFlow<Boolean> = prefs.disableIdleAlert
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     val savedDevices: StateFlow<List<DeviceEntity>> = deviceRepository.allDevices
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
@@ -229,6 +232,10 @@ class SettingsViewModel @Inject constructor(
 
     fun setStepGoal(steps: Int) {
         viewModelScope.launch { prefs.setDailyStepGoal(steps) }
+    }
+
+    fun setDisabledIdleAlert(disabled: Boolean) {
+        viewModelScope.launch { prefs.setDisableIdleAlert(disabled) }
     }
 
     fun removeDevice(address: String) {

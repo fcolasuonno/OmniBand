@@ -80,6 +80,13 @@ interface DeviceProtocol {
     /** Push the current phone time to the device. */
     suspend fun syncTime(gatt: BluetoothGatt)
 
+    /**
+     * Enable or disable the inactivity (idle) reminder on the device.
+     *
+     * Default is a no-op for devices without a configuration service.
+     */
+    suspend fun setInactivityWarnings(gatt: BluetoothGatt, enabled: Boolean) {}
+
     /** Request the current battery level (response comes via [events]). */
     suspend fun requestBattery(gatt: BluetoothGatt)
 

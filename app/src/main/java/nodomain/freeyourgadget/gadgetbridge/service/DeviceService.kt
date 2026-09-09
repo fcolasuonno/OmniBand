@@ -19,9 +19,11 @@ import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import nodomain.freeyourgadget.gadgetbridge.OmniBandApp
 import nodomain.freeyourgadget.gadgetbridge.R
@@ -116,6 +118,7 @@ class DeviceService : LifecycleService() {
 
         observeConnectionState()
         observeDeviceEvents()
+        observeIdleAlertSetting()
         autoConnectSavedDevice()
     }
 
@@ -200,12 +203,7 @@ class DeviceService : LifecycleService() {
             preferencesRepository.activeDeviceAddress
                 .flatMapLatest { address ->
                     if (address == null) flowOf() else bleManager.deviceEvents
-                        .let { flow ->
-                            // Tag each event with the current address so the DB insert uses the right key
-                            kotlinx.coroutines.flow.flow {
-                                flow.collect { event -> emit(address to event) }
-                            }
-                        }
+                        .map { event -> address to event }
                 }
                 .collect { (address, event) ->
                     val sleepEnabled = preferencesRepository.sleepAsAndroidEnabled.first()
@@ -244,9 +242,34 @@ class DeviceService : LifecycleService() {
             is DeviceEvent.DeviceReady -> {
                 Timber.i("DeviceService: device ready — syncing time")
                 lifecycleScope.launch { bleManager.syncTime() }
+                applyIdleAlertSetting()
             }
 
             else -> Unit
+        }
+    }
+
+    // Apply the idle-alert setting on connection and on live changes
+    private fun applyIdleAlertSetting() {
+        lifecycleScope.launch {
+            val disabled = preferencesRepository.disableIdleAlert.first()
+            Timber.d("DeviceService: applying idle-alert setting (disabled=$disabled)")
+            bleManager.setInactivityWarnings(!disabled)
+        }
+    }
+
+    // Observe the idle-alert preference and re-apply on live changes while connected
+    private fun observeIdleAlertSetting() {
+        lifecycleScope.launch {
+            preferencesRepository.disableIdleAlert
+                .distinctUntilChanged()
+                .collect { disabled ->
+                    // Only apply if we're currently connected
+                    if (bleManager.connectionState.value.isConnected) {
+                        Timber.d("DeviceService: idle-alert setting changed (disabled=$disabled) — reapplying")
+                        bleManager.setInactivityWarnings(!disabled)
+                    }
+                }
         }
     }
 

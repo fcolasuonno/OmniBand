@@ -51,8 +51,12 @@ object Huami2021Chunked {
 
     // ── Endpoints ─────────────────────────────────────────────────────────────
 
-    /** Service / capability list exchange. */
-    const val ENDPOINT_SERVICES: Short = 0x0001.toShort()
+    /**
+     * Service list exchange (phase 2, right after authentication).
+     * Request: `[0x03]`; reply: `[0x04][count:2 LE][endpoint:2 LE]…`.
+     * Data services must only be initialised after this list is received.
+     */
+    const val ENDPOINT_SERVICES: Short = 0x0000.toShort()
 
     /**
      * ZeppOS ECDH key-exchange endpoint (0x0002).
@@ -92,11 +96,22 @@ object Huami2021Chunked {
     /** Blood-oxygen (SpO₂) measurement control. */
     const val ENDPOINT_SPO2: Short = 0x0045.toShort()
 
+    /**
+     * Connection management / keepalive (encrypted).
+     * The band sends PING (`0x03`); the phone must reply with PONG (`0x04`).
+     * MTU request/reply (0x01/0x02) negotiates the chunked-transfer MTU.
+     */
+    const val ENDPOINT_CONNECTION: Short = 0x0015.toShort()
+
     /** Static device information (firmware version, hardware revision, …). */
     const val ENDPOINT_DEVICE_INFO: Short = 0x0043.toShort()
 
-    /** Device configuration (display items, DND schedule, …). */
-    const val ENDPOINT_CONFIG: Short = 0x002d.toShort()
+    /**
+     * Device configuration service (encrypted).
+     * Commands: capabilities request 0x01 / response 0x02, get 0x03 / response 0x04,
+     * set 0x05, ack 0x06.
+     */
+    const val ENDPOINT_CONFIG: Short = 0x000a.toShort()
 
     /** User profile (height, weight, date-of-birth, gender). */
     const val ENDPOINT_USER_INFO: Short = 0x0022.toShort()
@@ -115,6 +130,42 @@ object Huami2021Chunked {
     /** Status byte indicating a successful operation (second byte of most responses). */
     const val AUTH_SUCCESS: Byte = 0x01
 
+    // ── Service-list commands (endpoint 0x0000) ───────────────────────────────
+
+    /** Request the list of supported services. */
+    const val SERVICES_CMD_GET_LIST: Byte = 0x03
+
+    /** Reply containing the supported-services list. */
+    const val SERVICES_CMD_RET_LIST: Byte = 0x04
+
+    // ── Connection keepalive commands (endpoint 0x0015) ──────────────────────
+
+    const val CONNECTION_CMD_MTU_REQUEST: Byte = 0x01
+    const val CONNECTION_CMD_MTU_RESPONSE: Byte = 0x02
+    const val CONNECTION_CMD_PING: Byte = 0x03
+    const val CONNECTION_CMD_PONG: Byte = 0x04
+
+    // ── Configuration service (endpoint 0x000a) ───────────────────────────────
+
+    const val CONFIG_CMD_CAPABILITIES_REQUEST: Byte = 0x01
+    const val CONFIG_CMD_CAPABILITIES_RESPONSE: Byte = 0x02
+    const val CONFIG_CMD_REQUEST: Byte = 0x03
+    const val CONFIG_CMD_RESPONSE: Byte = 0x04
+    const val CONFIG_CMD_SET: Byte = 0x05
+    const val CONFIG_CMD_ACK: Byte = 0x06
+
+    /** Config group: HEALTH (inactivity reminder, sleep, HR settings, …). */
+    const val CONFIG_GROUP_HEALTH: Byte = 0x08
+
+    /** Config group version for HEALTH (highest known). */
+    const val CONFIG_GROUP_HEALTH_VERSION: Byte = 0x03
+
+    /** Argument: inactivity (idle) reminder enabled. */
+    const val CONFIG_ARG_INACTIVITY_ENABLED: Byte = 0x41
+
+    /** Config argument type: boolean. */
+    const val CONFIG_TYPE_BOOL: Byte = 0x0b
+
     // ── Encryption endpoint list ──────────────────────────────────────────────
 
     /**
@@ -124,6 +175,7 @@ object Huami2021Chunked {
      */
     fun isEncrypted(endpoint: Short): Boolean = when (endpoint) {
         ENDPOINT_BATTERY,
+        ENDPOINT_CONNECTION,
         ENDPOINT_ACTIVITY_FETCH,
         ENDPOINT_CONFIG,
         ENDPOINT_FIND_DEVICE,

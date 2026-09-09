@@ -187,6 +187,7 @@ class UserPreferencesRepository @Inject constructor(
         val SLEEP_ANDROID_ENABLED = booleanPreferencesKey("sleep_android_enabled")
         val HR_CONTINUOUS         = booleanPreferencesKey("hr_continuous")
         val DAILY_GOAL_STEPS      = stringPreferencesKey("daily_goal_steps")
+        val DISABLE_IDLE_ALERT = booleanPreferencesKey("disable_idle_alert")
     }
 
     val activeDeviceAddress: Flow<String?> = context.dataStore.data
@@ -210,6 +211,9 @@ class UserPreferencesRepository @Inject constructor(
     val dailyStepGoal: Flow<Int> = context.dataStore.data
         .map { it[Keys.DAILY_GOAL_STEPS]?.toIntOrNull() ?: 8000 }
 
+    val disableIdleAlert: Flow<Boolean> = context.dataStore.data
+        .map { it[Keys.DISABLE_IDLE_ALERT] ?: false }
+
     suspend fun saveActiveDevice(address: String, type: String) {
         context.dataStore.edit { prefs ->
             prefs[Keys.ACTIVE_DEVICE_ADDRESS] = address
@@ -231,5 +235,9 @@ class UserPreferencesRepository @Inject constructor(
 
     suspend fun setDailyStepGoal(steps: Int) {
         context.dataStore.edit { it[Keys.DAILY_GOAL_STEPS] = steps.toString() }
+    }
+
+    suspend fun setDisableIdleAlert(disabled: Boolean) {
+        context.dataStore.edit { it[Keys.DISABLE_IDLE_ALERT] = disabled }
     }
 }

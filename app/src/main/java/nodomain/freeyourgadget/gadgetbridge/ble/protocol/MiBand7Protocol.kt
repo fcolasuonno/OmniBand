@@ -392,10 +392,48 @@ class MiBand7Protocol(
 
         when (endpoint) {
             Huami2021Chunked.ENDPOINT_SERVICES -> {
-                Timber.d("MiBand7: received services list (%d bytes)", payload.size)
-                if (!isInitializingServices) {
-                    isInitializingServices = true
-                    scope.launch { postAuthSetup(gatt) }
+                // Service list: [0x04][count:2 LE][endpoint:2 LE]…
+                if (payload.size >= 3 && payload[0].toInt() and 0xFF == Huami2021Chunked.SERVICES_CMD_RET_LIST.toInt()) {
+                    val count =
+                        (payload[1].toInt() and 0xFF) or ((payload[2].toInt() and 0xFF) shl 8)
+                    val endpoints = (0 until count).mapNotNull { i ->
+                        val o = 3 + i * 2
+                        if (o + 1 < payload.size) {
+                            "0x%04x".format((payload[o].toInt() and 0xFF) or ((payload[o + 1].toInt() and 0xFF) shl 8))
+                        } else null
+                    }
+                    Timber.i("MiBand7: supported services (%d): %s", count, endpoints)
+                    if (!isInitializingServices) {
+                        isInitializingServices = true
+                        scope.launch { postAuthSetup(gatt) }
+                    }
+                } else {
+                    Timber.d("MiBand7: unexpected services payload [%s]", payload.toHex())
+                }
+            }
+
+            Huami2021Chunked.ENDPOINT_CONNECTION -> {
+                when (payload.firstOrNull()?.toInt()?.and(0xFF)) {
+                    Huami2021Chunked.CONNECTION_CMD_PING.toInt() -> {
+                        // Band keepalive ping — must be answered or the link is dropped
+                        Timber.d("MiBand7: connection PING — replying PONG")
+                        scope.launch {
+                            writeChunked(
+                                gatt, Huami2021Chunked.ENDPOINT_CONNECTION,
+                                byteArrayOf(Huami2021Chunked.CONNECTION_CMD_PONG)
+                            )
+                        }
+                    }
+
+                    Huami2021Chunked.CONNECTION_CMD_MTU_RESPONSE.toInt() -> {
+                        if (payload.size >= 3) {
+                            val deviceMtu = (payload[1].toInt() and 0xFF) or
+                                    ((payload[2].toInt() and 0xFF) shl 8) + 3
+                            Timber.i("MiBand7: device announced chunked MTU: %d", deviceMtu)
+                        }
+                    }
+
+                    else -> Timber.d("MiBand7: unhandled connection payload [%s]", payload.toHex())
                 }
             }
 
@@ -426,6 +464,21 @@ class MiBand7Protocol(
 
             Huami2021Chunked.ENDPOINT_DEVICE_INFO -> {
                 Timber.i("MiBand7: device info  [%s]", payload.toHex())
+            }
+
+            Huami2021Chunked.ENDPOINT_CONFIG -> {
+                when (payload.firstOrNull()?.toInt()?.and(0xFF)) {
+                    Huami2021Chunked.CONFIG_CMD_ACK.toInt() ->
+                        Timber.i(
+                            "MiBand7: config SET ack, status=0x%02x",
+                            payload.getOrNull(1)?.toInt()?.and(0xFF) ?: -1
+                        )
+
+                    Huami2021Chunked.CONFIG_CMD_RESPONSE.toInt() ->
+                        Timber.d("MiBand7: config response: [%s]", payload.toHex())
+
+                    else -> Timber.d("MiBand7: unhandled config payload [%s]", payload.toHex())
+                }
             }
 
             else -> {
@@ -502,10 +555,10 @@ class MiBand7Protocol(
 
                     scope.launch {
                         _events.emit(DeviceEvent.DeviceReady)
-                        // Small delay to let the band settle before issuing requests
-                        delay(600)
-                        requestBattery(gatt)
-                        delay(600)
+                        // Phase 2: request the supported-services list.  The band only
+                        // answers data requests (battery, steps, …) after this exchange,
+                        // so the actual device setup runs in postAuthSetup() when the
+                        // list arrives.
                         requestServices(gatt)
                     }
                 } else {
@@ -623,40 +676,59 @@ class MiBand7Protocol(
     /**
      * Parse a step / activity endpoint payload.
      *
-     * The band carries two payload sub-types on endpoint 0x0016. In both, the step
-     * counter is a **uint16** at offset 1 of a 13-byte data block:
+     * The band carries two payload sub-types on endpoint 0x0016. Both embed the same
+     * 13-byte data block:
+     * ```
+     * [?][steps:2 LE][? ?][distanceM:4 LE][calories:4 LE]
+     * ```
      *
      * **Real-time push notification (CMD=0x07), 14 bytes total:**
      * ```
-     * [0x07][ data:13 ]   where data = [?][steps:2 LE][10 bytes]
+     * [0x07][ data:13 ]   (block starts at p[1])
      * ```
      * **Reply to an explicit step request (CMD=0x04), 15 bytes total:**
      * ```
-     * [0x04][status][ data:13 ]   where data = [?][steps:2 LE][10 bytes]
+     * [0x04][status][ data:13 ]   (block starts at p[2])
      * ```
-     * (Only the step count is defined by the protocol; distance/calories are not
-     * exposed here.)
      */
     private fun parseActivity(p: ByteArray) {
         if (p.isEmpty()) return
-        val stepsOf: (ByteArray, Int) -> Int = { arr, base ->
+        val u16: (ByteArray, Int) -> Int = { arr, base ->
             (arr[base].toInt() and 0xFF) or ((arr[base + 1].toInt() and 0xFF) shl 8)
+        }
+        val u32: (ByteArray, Int) -> Int = { arr, base ->
+            (arr[base].toInt() and 0xFF) or ((arr[base + 1].toInt() and 0xFF) shl 8) or
+                    ((arr[base + 2].toInt() and 0xFF) shl 16) or ((arr[base + 3].toInt() and 0xFF) shl 24)
+        }
+
+        // Both sub-types carry the same 13-byte block starting at `base`:
+        // [?][steps:2 LE][? ?][distanceM:4 LE][calories:4 LE]
+        fun emit(base: Int, tag: String) {
+            val steps = u16(p, base + 1)
+            val distM = u32(p, base + 5)
+            val cal = u32(p, base + 9)
+            Timber.d("MiBand7: steps %s → steps=%d dist=%dm kcal=%d", tag, steps, distM, cal)
+            if (steps > 0) scope.launch {
+                _events.emit(
+                    DeviceEvent.Steps(
+                        steps,
+                        cal,
+                        distM.toFloat()
+                    )
+                )
+            }
         }
         when (p[0].toInt() and 0xFF) {
             0x07 -> {
-                // [0x07][13-byte block] → steps at block offset 1 = p[2..4)
+                // [0x07][13-byte block] → block starts at p[1]
                 if (p.size < 14) return
-                val steps = stepsOf(p, 2)
-                Timber.d("MiBand7: steps push → steps=%d", steps)
-                if (steps > 0) scope.launch { _events.emit(DeviceEvent.Steps(steps, 0, 0f)) }
+                emit(1, "push")
             }
 
             0x04 -> {
-                // [0x04][status][13-byte block] → steps at block offset 1 = p[3..5)
+                // [0x04][status][13-byte block] → block starts at p[2]
                 if (p.size < 15) return
-                val steps = stepsOf(p, 3)
-                Timber.i("MiBand7: steps reply → steps=%d", steps)
-                if (steps > 0) scope.launch { _events.emit(DeviceEvent.Steps(steps, 0, 0f)) }
+                emit(2, "reply")
             }
 
             else -> Timber.v("MiBand7: ignoring activity sub-command 0x%02x", p[0].toInt() and 0xFF)
@@ -723,6 +795,31 @@ class MiBand7Protocol(
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_TIME, p)
     }
 
+    /**
+     * Enable or disable the inactivity (idle) reminder.
+     *
+     * Config SET frame (endpoint 0x000a, encrypted):
+     * ```
+     * [0x05 SET][HEALTH 0x08][version 0x03][0x00][numArgs 0x01]
+     * [arg 0x41][type BOOL 0x0b][value 0x00|0x01]
+     * ```
+     * The band replies with an ACK `[0x06][status]` on the config endpoint.
+     */
+    override suspend fun setInactivityWarnings(gatt: BluetoothGatt, enabled: Boolean) {
+        Timber.i("MiBand7: %s inactivity (idle) reminder", if (enabled) "enabling" else "disabling")
+        val payload = byteArrayOf(
+            Huami2021Chunked.CONFIG_CMD_SET,
+            Huami2021Chunked.CONFIG_GROUP_HEALTH,
+            Huami2021Chunked.CONFIG_GROUP_HEALTH_VERSION,
+            0x00,
+            0x01,
+            Huami2021Chunked.CONFIG_ARG_INACTIVITY_ENABLED,
+            Huami2021Chunked.CONFIG_TYPE_BOOL,
+            if (enabled) 0x01 else 0x00,
+        )
+        writeChunked(gatt, Huami2021Chunked.ENDPOINT_CONFIG, payload)
+    }
+
     override suspend fun requestBattery(gatt: BluetoothGatt) {
         Timber.d("MiBand7: requesting battery info…")
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_BATTERY, byteArrayOf(0x03))
@@ -730,7 +827,10 @@ class MiBand7Protocol(
 
     private suspend fun requestServices(gatt: BluetoothGatt) {
         Timber.d("MiBand7: requesting services list…")
-        writeChunked(gatt, Huami2021Chunked.ENDPOINT_SERVICES, byteArrayOf(0x01))
+        writeChunked(
+            gatt, Huami2021Chunked.ENDPOINT_SERVICES,
+            byteArrayOf(Huami2021Chunked.SERVICES_CMD_GET_LIST)
+        )
     }
 
     private suspend fun requestDeviceInfo(gatt: BluetoothGatt) {
