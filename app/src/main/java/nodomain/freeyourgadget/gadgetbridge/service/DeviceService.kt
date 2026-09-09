@@ -18,6 +18,7 @@ import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -32,6 +33,7 @@ import nodomain.freeyourgadget.gadgetbridge.ble.ConnectionState
 import nodomain.freeyourgadget.gadgetbridge.ble.DeviceType
 import nodomain.freeyourgadget.gadgetbridge.ble.isConnected
 import nodomain.freeyourgadget.gadgetbridge.ble.protocol.DeviceEvent
+import nodomain.freeyourgadget.gadgetbridge.ble.protocol.SleepStage
 import nodomain.freeyourgadget.gadgetbridge.data.repository.DeviceRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.HealthRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.UserPreferencesRepository
@@ -119,6 +121,7 @@ class DeviceService : LifecycleService() {
         observeConnectionState()
         observeDeviceEvents()
         observeIdleAlertSetting()
+        schedulePeriodicHistorySync()
         autoConnectSavedDevice()
     }
 
@@ -243,9 +246,39 @@ class DeviceService : LifecycleService() {
                 Timber.i("DeviceService: device ready — syncing time")
                 lifecycleScope.launch { bleManager.syncTime() }
                 applyIdleAlertSetting()
+                fetchSleepHistoryAuto()
             }
 
+            is DeviceEvent.SleepData -> handleSleepState(address, event)
+
             else -> Unit
+        }
+    }
+
+    // ── Sleep session tracking ────────────────────────────────────────────
+
+    private var activeSleepSessionId: Long? = null
+    private var activeSleepAddress: String? = null
+
+    /**
+     * Turns band sleep-state events ([DeviceEvent.SleepData], from the 0x001D
+     * fall-asleep/wake-up notification) into persisted sleep sessions + stages.
+     */
+    private suspend fun handleSleepState(address: String, event: DeviceEvent.SleepData) {
+        if (event.stage == SleepStage.AWAKE) {
+            val id = activeSleepSessionId?.takeIf { activeSleepAddress == address } ?: return
+            healthRepository.addSleepStage(id, SleepStage.AWAKE.name)
+            healthRepository.endSleepSession(id)
+            Timber.i("DeviceService: sleep session %d ended", id)
+            activeSleepSessionId = null
+            activeSleepAddress = null
+        } else {
+            if (activeSleepSessionId == null || activeSleepAddress != address) {
+                activeSleepSessionId = healthRepository.startSleepSession(address)
+                activeSleepAddress = address
+                Timber.i("DeviceService: sleep session %d started", activeSleepSessionId)
+            }
+            healthRepository.addSleepStage(activeSleepSessionId!!, event.stage.name)
         }
     }
 
@@ -270,6 +303,77 @@ class DeviceService : LifecycleService() {
                         bleManager.setInactivityWarnings(!disabled)
                     }
                 }
+        }
+    }
+
+    /**
+     * Re-pull recorded history every 15 minutes while connected, so values recorded
+     * after the initial post-connect sync (e.g. a new stress reading) show up
+     * without manual syncing.
+     */
+    private fun schedulePeriodicHistorySync() {
+        lifecycleScope.launch {
+            while (true) {
+                delay(15 * 60 * 1000L)
+                if (bleManager.connectionState.value.isConnected) {
+                    Timber.d("DeviceService: periodic history sync")
+                    fetchSleepHistoryAuto()
+                }
+            }
+        }
+    }
+
+    /**
+     * Pull recorded history (sleep, SpO2, stress) since the last successful fetch
+     * (max 7 days back). Runs once per connection; failures are non-fatal.
+     */
+    private fun fetchSleepHistoryAuto() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val now = System.currentTimeMillis()
+                val last = preferencesRepository.lastHistoryFetchMs.first()
+                val since = maxOf(if (last > 0) last else 0L, now - 7L * 24 * 3600 * 1000)
+                val address = preferencesRepository.activeDeviceAddress.first() ?: return@launch
+                var importedSleep = 0
+                var importedSpo2 = 0
+                var importedStress = 0
+                bleManager.withHistorySyncLock {
+                    bleManager.fetchSleepHistory(since).forEach { s ->
+                        if (healthRepository.importSleepSession(
+                                address,
+                                s.startMs,
+                                s.endMs,
+                                s.stages
+                            ) != null
+                        ) {
+                            importedSleep++
+                        }
+                    }
+                    bleManager.fetchSpo2History(since).forEach { s ->
+                        if (healthRepository.importSpO2At(
+                                address,
+                                s.percent,
+                                s.timestampMs
+                            )
+                        ) importedSpo2++
+                    }
+                    bleManager.fetchStressHistory(since).forEach { s ->
+                        if (healthRepository.importStressAt(
+                                address,
+                                s.score,
+                                s.timestampMs
+                            )
+                        ) importedStress++
+                    }
+                }
+                preferencesRepository.setLastHistoryFetchMs(now)
+                Timber.i(
+                    "DeviceService: history sync: %d sleep, %d SpO2, %d stress new",
+                    importedSleep, importedSpo2, importedStress
+                )
+            } catch (e: Exception) {
+                Timber.w(e, "DeviceService: history sync failed")
+            }
         }
     }
 

@@ -5,18 +5,21 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import nodomain.freeyourgadget.gadgetbridge.ble.DeviceType
+import nodomain.freeyourgadget.gadgetbridge.ble.protocol.SleepStageSample
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.BatteryDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.DeviceDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.HeartRateDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.SleepDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.SpO2Dao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StepsDao
+import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StressDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.BatteryEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.DeviceEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.HeartRateEntity
@@ -24,6 +27,7 @@ import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepSessionEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepStageEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SpO2Entity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.StepsEntity
+import nodomain.freeyourgadget.gadgetbridge.data.db.entity.StressEntity
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -77,7 +81,8 @@ class HealthRepository @Inject constructor(
     private val stepsDao: StepsDao,
     private val sleepDao: SleepDao,
     private val spo2Dao: SpO2Dao,
-    private val batteryDao: BatteryDao
+    private val batteryDao: BatteryDao,
+    private val stressDao: StressDao
 ) {
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
 
@@ -145,11 +150,71 @@ class HealthRepository @Inject constructor(
         )
     }
 
+    /**
+     * Import one historical sleep session (e.g. from a band fetch).
+     * @return the new session id, or null if a session with the same start already exists.
+     */
+    suspend fun importSleepSession(
+        address: String,
+        startMs: Long,
+        endMs: Long,
+        stages: List<SleepStageSample>,
+    ): Long? {
+        if (sleepDao.getSessionByStartTime(address, startMs) != null) return null
+        val id = sleepDao.insertSession(
+            SleepSessionEntity(
+                deviceAddress = address,
+                startTime = startMs,
+                endTime = endMs,
+                source = "freeyourgadget.gadgetbridge"
+            )
+        )
+        stages.forEach { st ->
+            sleepDao.insertStage(
+                SleepStageEntity(sessionId = id, stage = st.stage.name, timestamp = st.startMs)
+            )
+        }
+        return id
+    }
+
     // SpO2
     fun getRecentSpO2(address: String): Flow<List<SpO2Entity>> = spo2Dao.getRecent(address)
 
     suspend fun saveSpO2(address: String, percent: Int) {
         spo2Dao.insert(SpO2Entity(deviceAddress = address, percent = percent))
+    }
+
+    /** Insert one historical SpO2 sample; returns false if it already exists. */
+    suspend fun importSpO2At(address: String, percent: Int, timestamp: Long): Boolean {
+        if (spo2Dao.getAt(address, timestamp) != null) return false
+        spo2Dao.insert(
+            SpO2Entity(
+                deviceAddress = address,
+                percent = percent,
+                timestamp = timestamp
+            )
+        )
+        return true
+    }
+
+    fun getLatestSpO2(address: String): Flow<SpO2Entity?> =
+        getRecentSpO2(address).map { list -> list.firstOrNull() }
+
+    // Stress
+    fun getRecentStress(address: String): Flow<List<StressEntity>> =
+        stressDao.getRecent(address)
+
+    /** Insert one historical stress sample; returns false if it already exists. */
+    suspend fun importStressAt(address: String, score: Int, timestamp: Long): Boolean {
+        if (stressDao.getAt(address, timestamp) != null) return false
+        stressDao.insert(
+            StressEntity(
+                deviceAddress = address,
+                score = score,
+                timestamp = timestamp
+            )
+        )
+        return true
     }
 
     // Battery
@@ -188,6 +253,9 @@ class UserPreferencesRepository @Inject constructor(
         val HR_CONTINUOUS         = booleanPreferencesKey("hr_continuous")
         val DAILY_GOAL_STEPS      = stringPreferencesKey("daily_goal_steps")
         val DISABLE_IDLE_ALERT = booleanPreferencesKey("disable_idle_alert")
+
+        // v2: reset the window so post-purge history (v4 DB) is fully re-pulled once.
+        val LAST_HISTORY_FETCH_MS = longPreferencesKey("last_history_fetch_ms_v2")
     }
 
     val activeDeviceAddress: Flow<String?> = context.dataStore.data
@@ -214,6 +282,9 @@ class UserPreferencesRepository @Inject constructor(
     val disableIdleAlert: Flow<Boolean> = context.dataStore.data
         .map { it[Keys.DISABLE_IDLE_ALERT] ?: false }
 
+    val lastHistoryFetchMs: Flow<Long> = context.dataStore.data
+        .map { it[Keys.LAST_HISTORY_FETCH_MS] ?: 0L }
+
     suspend fun saveActiveDevice(address: String, type: String) {
         context.dataStore.edit { prefs ->
             prefs[Keys.ACTIVE_DEVICE_ADDRESS] = address
@@ -239,5 +310,9 @@ class UserPreferencesRepository @Inject constructor(
 
     suspend fun setDisableIdleAlert(disabled: Boolean) {
         context.dataStore.edit { it[Keys.DISABLE_IDLE_ALERT] = disabled }
+    }
+
+    suspend fun setLastHistoryFetchMs(ms: Long) {
+        context.dataStore.edit { it[Keys.LAST_HISTORY_FETCH_MS] = ms }
     }
 }

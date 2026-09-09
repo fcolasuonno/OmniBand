@@ -13,6 +13,7 @@ import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepSessionEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepStageEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SpO2Entity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.StepsEntity
+import nodomain.freeyourgadget.gadgetbridge.data.db.entity.StressEntity
 
 @Dao
 interface DeviceDao {
@@ -85,6 +86,9 @@ interface SleepDao {
     @Query("SELECT * FROM sleep_sessions WHERE id = :sessionId")
     suspend fun getSession(sessionId: Long): SleepSessionEntity?
 
+    @Query("SELECT * FROM sleep_sessions WHERE deviceAddress = :address AND startTime = :startTime LIMIT 1")
+    suspend fun getSessionByStartTime(address: String, startTime: Long): SleepSessionEntity?
+
     @Query("SELECT * FROM sleep_stages WHERE sessionId = :sessionId ORDER BY timestamp ASC")
     fun getStagesForSession(sessionId: Long): Flow<List<SleepStageEntity>>
 
@@ -103,8 +107,29 @@ interface SpO2Dao {
     @Query("SELECT * FROM spo2 WHERE deviceAddress = :address ORDER BY timestamp DESC LIMIT 50")
     fun getRecent(address: String): Flow<List<SpO2Entity>>
 
+    @Query("SELECT * FROM spo2 WHERE deviceAddress = :address ORDER BY timestamp DESC LIMIT 1")
+    suspend fun getLatest(address: String): SpO2Entity?
+
+    @Query("SELECT * FROM spo2 WHERE deviceAddress = :address AND timestamp = :timestamp LIMIT 1")
+    suspend fun getAt(address: String, timestamp: Long): SpO2Entity?
+
     @Insert
     suspend fun insert(entity: SpO2Entity)
+}
+
+@Dao
+interface StressDao {
+    @Query("SELECT * FROM stress WHERE deviceAddress = :address ORDER BY timestamp DESC LIMIT 100")
+    fun getRecent(address: String): Flow<List<StressEntity>>
+
+    @Query("SELECT * FROM stress WHERE deviceAddress = :address ORDER BY timestamp DESC LIMIT 1")
+    suspend fun getLatest(address: String): StressEntity?
+
+    @Query("SELECT * FROM stress WHERE deviceAddress = :address AND timestamp = :timestamp LIMIT 1")
+    suspend fun getAt(address: String, timestamp: Long): StressEntity?
+
+    @Insert
+    suspend fun insert(entity: StressEntity)
 }
 
 @Dao

@@ -166,6 +166,32 @@ object Huami2021Chunked {
     /** Config argument type: boolean. */
     const val CONFIG_TYPE_BOOL: Byte = 0x0b
 
+    // ── Activity fetch (endpoint 0x004b, Huami fetch protocol) ────────────────
+
+    /** Fetch handshake: start-date request. */
+    const val FETCH_CMD_START_DATE: Byte = 0x01
+
+    /** Fetch handshake: begin data transfer. */
+    const val FETCH_CMD_FETCH_DATA: Byte = 0x02
+
+    /** Fetch handshake: acknowledge transfer. */
+    const val FETCH_CMD_ACK: Byte = 0x03
+
+    /** Fetch data type: sleep sessions (594-byte records). */
+    const val FETCH_TYPE_SLEEP_SESSION: Byte = 0x48
+
+    /** Fetch data type: SpO2 samples (65-byte records). */
+    const val FETCH_TYPE_SPO2_NORMAL: Byte = 0x25
+
+    /** Fetch data type: automatic stress samples (1 byte/minute). */
+    const val FETCH_TYPE_STRESS_AUTO: Byte = 0x13
+
+    /** ACK byte: data received, drop from band. */
+    const val FETCH_ACK_DROP: Byte = 0x01
+
+    /** ACK byte: keep data on band (transfer failed). */
+    const val FETCH_ACK_KEEP: Byte = 0x09
+
     // ── Encryption endpoint list ──────────────────────────────────────────────
 
     /**

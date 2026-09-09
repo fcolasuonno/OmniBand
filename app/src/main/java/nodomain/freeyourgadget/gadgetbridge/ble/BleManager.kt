@@ -39,7 +39,10 @@ import kotlinx.coroutines.sync.withLock
 import nodomain.freeyourgadget.gadgetbridge.ble.protocol.DeviceEvent
 import nodomain.freeyourgadget.gadgetbridge.ble.protocol.DeviceProtocol
 import nodomain.freeyourgadget.gadgetbridge.ble.protocol.MiBand7Protocol
+import nodomain.freeyourgadget.gadgetbridge.ble.protocol.SleepSessionRecord
 import nodomain.freeyourgadget.gadgetbridge.ble.protocol.SonyWF1000XM5Protocol
+import nodomain.freeyourgadget.gadgetbridge.ble.protocol.SpO2SampleRecord
+import nodomain.freeyourgadget.gadgetbridge.ble.protocol.StressSampleRecord
 import nodomain.freeyourgadget.gadgetbridge.ble.protocol.VibratePattern
 import nodomain.freeyourgadget.gadgetbridge.ble.reconnect.ReconnectionManager
 import timber.log.Timber
@@ -573,6 +576,39 @@ class BleManager @Inject constructor(
     suspend fun setInactivityWarnings(enabled: Boolean) {
         activeGatt?.let { activeProtocol?.setInactivityWarnings(it, enabled) }
     }
+
+    /**
+     * Pull sleep sessions recorded since [sinceMs] (Huami fetch protocol).
+     * Returns parsed sessions (possibly empty). Safe to call any time; yields
+     * an empty list when not connected to a Mi Band.
+     */
+    suspend fun fetchSleepHistory(sinceMs: Long): List<SleepSessionRecord> {
+        val protocol = activeProtocol as? MiBand7Protocol ?: return emptyList()
+        return protocol.fetchSleepSessions(sinceMs)
+    }
+
+    /** Pull historical SpO2 samples recorded since [sinceMs]. */
+    suspend fun fetchSpo2History(sinceMs: Long): List<SpO2SampleRecord> {
+        val protocol = activeProtocol as? MiBand7Protocol ?: return emptyList()
+        return protocol.fetchSpo2History(sinceMs)
+    }
+
+    /** Pull automatic stress samples recorded since [sinceMs]. */
+    suspend fun fetchStressHistory(sinceMs: Long): List<StressSampleRecord> {
+        val protocol = activeProtocol as? MiBand7Protocol ?: return emptyList()
+        return protocol.fetchStressHistory(sinceMs)
+    }
+
+    /**
+     * Serializes whole history-sync runs (sleep + SpO2 + stress). The band's fetch
+     * state machine gets confused by interleaved START_DATEs from overlapping runs
+     * (auto-fetch on connect vs manual sync), answering with crossed responses —
+     * so all callers must go through here.
+     */
+    private val historySyncMutex = Mutex()
+
+    suspend fun <R> withHistorySyncLock(action: suspend () -> R): R =
+        historySyncMutex.withLock { action() }
 
     suspend fun requestBattery() {
         activeGatt?.let { activeProtocol?.requestBattery(it) }

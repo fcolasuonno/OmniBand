@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Bloodtype
 import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.Spa
 import androidx.compose.material.icons.filled.Vibration
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -80,6 +81,7 @@ fun DashboardScreen(
     val todaySteps by viewModel.todaySteps.collectAsStateWithLifecycle()
     val battery by viewModel.battery.collectAsStateWithLifecycle()
     val lastSpO2 by viewModel.lastSpO2.collectAsStateWithLifecycle()
+    val lastStress by viewModel.lastStress.collectAsStateWithLifecycle()
     val ancMode by viewModel.ancMode.collectAsStateWithLifecycle()
     val stepGoal by viewModel.stepGoal.collectAsStateWithLifecycle(8000)
     val recentHR by viewModel.recentHeartRates.collectAsStateWithLifecycle(emptyList())
@@ -160,6 +162,21 @@ fun DashboardScreen(
                 goal = stepGoal,
                 calories = todaySteps?.calories ?: 0,
                 distanceMeters = todaySteps?.distanceMeters ?: 0f
+            )
+
+            // ---- Stress Card ----
+            MetricCard(
+                modifier = Modifier.fillMaxWidth(),
+                icon = Icons.Filled.Spa,
+                iconColor = Color(0xFF9C27B0),
+                label = "Stress",
+                value = lastStress?.score?.let { "$it" } ?: "--",
+                unit = lastStress?.let { s ->
+                    stressLevelLabel(s.score) + " · " + ageAgo(s.timestamp)
+                } ?: "/100",
+                gradient = Brush.verticalGradient(
+                    listOf(Color(0xFF9C27B0).copy(alpha = 0.15f), Color.Transparent)
+                )
             )
 
             // ---- Heart Rate mini-chart (last 20 readings) ----
@@ -297,6 +314,23 @@ fun MetricCard(
 // ---------------------------------------------------------------------------
 // Steps Card
 // ---------------------------------------------------------------------------
+
+private fun stressLevelLabel(score: Int): String = when (score) {
+    in 0..39 -> "relaxed"
+    in 40..59 -> "mild"
+    in 60..79 -> "moderate"
+    else -> "high"
+}
+
+private fun ageAgo(timestampMs: Long): String {
+    val mins = ((System.currentTimeMillis() - timestampMs) / 60_000).coerceAtLeast(0)
+    return when {
+        mins < 1 -> "just now"
+        mins < 60 -> "${mins}m ago"
+        mins < 1440 -> "${mins / 60}h ago"
+        else -> "${mins / 1440}d ago"
+    }
+}
 
 @Composable
 fun StepsCard(steps: Int, goal: Int, calories: Int, distanceMeters: Float) {

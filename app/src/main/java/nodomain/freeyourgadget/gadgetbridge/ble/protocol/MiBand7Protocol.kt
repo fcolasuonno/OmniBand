@@ -6,6 +6,8 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothStatusCodes
 import android.os.Build
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,6 +23,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
+import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
@@ -28,6 +31,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.util.Calendar
 import java.util.UUID
+import java.util.zip.CRC32
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 import kotlin.coroutines.Continuation
@@ -105,8 +109,24 @@ class MiBand7Protocol(
         private val UUID_SERVICE_STD_BATTERY: UUID =
             UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb")
 
+        /** Classic activity-control characteristic (fetch metadata path). */
+        val UUID_CHAR_ACTIVITY_CONTROL: UUID =
+            UUID.fromString("00000004-0000-3512-2118-0009af100700")
+
+        /** Classic activity-data characteristic (fetch bulk-data path). */
+        val UUID_CHAR_ACTIVITY_DATA: UUID =
+            UUID.fromString("00000005-0000-3512-2118-0009af100700")
+
         /** How long to wait for the ECDH handshake to complete before giving up. */
         private const val AUTH_TIMEOUT_MS = 30_000L
+
+        /** Fetch handshake timeouts (the band can answer minutes late). */
+        private const val FETCH_START_TIMEOUT_MS = 60_000L
+        private const val FETCH_DATA_TIMEOUT_MS = 180_000L
+        private const val FETCH_ACK_TIMEOUT_MS = 30_000L
+
+        /** Size of one sleep-session record (4-byte timestamp + 590 bytes detail). */
+        private const val SLEEP_RECORD_SIZE = 594
 
         /** How often to re-send the ECDH public key while waiting for the band's reply. */
         private const val ECDH_RETRY_MS = 5_000L
@@ -124,6 +144,9 @@ class MiBand7Protocol(
     private var chunkedWrite: BluetoothGattCharacteristic? = null
     private var chunkedRead: BluetoothGattCharacteristic? = null
     private var hrChar: BluetoothGattCharacteristic? = null
+    private var activityControl: BluetoothGattCharacteristic? = null
+    private var activityData: BluetoothGattCharacteristic? = null
+    private var sessionGatt: BluetoothGatt? = null
 
     private val decoder = Huami2021Chunked.Decoder()
 
@@ -168,6 +191,22 @@ class MiBand7Protocol(
     private var awaitDescriptorWrite: (suspend () -> Unit)? = null
     private var awaitCharacteristicWrite: (suspend () -> Unit)? = null
 
+    // Sleep-history fetch state (Huami fetch protocol, guarded by fetchMutex)
+    private val fetchMutex = Mutex()
+
+    private enum class FetchPhase { IDLE, AWAIT_START, COLLECTING, AWAIT_ACK }
+
+    @Volatile
+    private var fetchPhase = FetchPhase.IDLE
+    @Volatile
+    private var fetchMeta: CompletableDeferred<ByteArray>? = null
+    private var fetchBuffer = ByteArrayOutputStream()
+    private var fetchExpected = 0
+    private var fetchLastCounter = -1
+
+    /** Endpoints the band advertised in its service list (3-byte [ep_lo, ep_hi, flags] entries). */
+    private val supportedEndpoints = mutableSetOf<Short>()
+
     /** Auth key to use: the provided key if non-zero, otherwise the hardcoded default. */
     private val effectiveAuthKey: ByteArray
         get() = if (authKey.all { it == 0.toByte() }) DEFAULT_AUTH_KEY else authKey
@@ -186,6 +225,7 @@ class MiBand7Protocol(
         isInitialized = true
         this.awaitDescriptorWrite = awaitDescriptorWrite
         this.awaitCharacteristicWrite = awaitCharacteristicWrite
+        sessionGatt = gatt
 
         Timber.i("MiBand7: initializing ${gatt.device.address} (MTU=$negotiatedMtu)")
 
@@ -193,6 +233,9 @@ class MiBand7Protocol(
         for (svc in gatt.services) {
             if (chunkedWrite == null) chunkedWrite = svc.getCharacteristic(UUID_CHAR_CHUNKED_WRITE)
             if (chunkedRead  == null) chunkedRead  = svc.getCharacteristic(UUID_CHAR_CHUNKED_READ)
+            if (activityControl == null) activityControl =
+                svc.getCharacteristic(UUID_CHAR_ACTIVITY_CONTROL)
+            if (activityData == null) activityData = svc.getCharacteristic(UUID_CHAR_ACTIVITY_DATA)
         }
         hrChar = gatt.getService(UUID_SERVICE_HR)?.getCharacteristic(UUID_CHAR_HR_MEASUREMENT)
         val stdBatteryChar = gatt.getService(UUID_SERVICE_STD_BATTERY)
@@ -230,6 +273,20 @@ class MiBand7Protocol(
         // Subscribe to standard GATT battery service as a fallback
         stdBatteryChar?.let {
             Timber.i("MiBand7: standard GATT battery service found — subscribing")
+            if (enableNotification(gatt, it)) {
+                awaitDescriptorWrite()
+                delay(200)
+            }
+        }
+
+        // Subscribe to classic activity control/data (sleep-history fetch path)
+        activityControl?.let {
+            if (enableNotification(gatt, it)) {
+                awaitDescriptorWrite()
+                delay(200)
+            }
+        }
+        activityData?.let {
             if (enableNotification(gatt, it)) {
                 awaitDescriptorWrite()
                 delay(200)
@@ -358,6 +415,18 @@ class MiBand7Protocol(
                 true
             }
 
+            UUID_CHAR_ACTIVITY_CONTROL -> {
+                // Fetch metadata also arrives here (raw Huami framing, no chunk header)
+                handleFetchControl(value)
+                true
+            }
+
+            UUID_CHAR_ACTIVITY_DATA -> {
+                // Fetch bulk data: raw [counter][payload…] frames, no chunk header
+                handleFetchData(value)
+                true
+            }
+
             else -> false
         }
     }
@@ -392,14 +461,17 @@ class MiBand7Protocol(
 
         when (endpoint) {
             Huami2021Chunked.ENDPOINT_SERVICES -> {
-                // Service list: [0x04][count:2 LE][endpoint:2 LE]…
+                // Service list: [0x04][count:2 LE][ep_lo, ep_hi, flags]…
                 if (payload.size >= 3 && payload[0].toInt() and 0xFF == Huami2021Chunked.SERVICES_CMD_RET_LIST.toInt()) {
                     val count =
                         (payload[1].toInt() and 0xFF) or ((payload[2].toInt() and 0xFF) shl 8)
                     val endpoints = (0 until count).mapNotNull { i ->
-                        val o = 3 + i * 2
-                        if (o + 1 < payload.size) {
-                            "0x%04x".format((payload[o].toInt() and 0xFF) or ((payload[o + 1].toInt() and 0xFF) shl 8))
+                        val o = 3 + i * 3
+                        if (o + 2 < payload.size) {
+                            val ep =
+                                ((payload[o].toInt() and 0xFF) or ((payload[o + 1].toInt() and 0xFF) shl 8)).toShort()
+                            supportedEndpoints.add(ep)
+                            "0x%04x".format(ep.toInt() and 0xFFFF)
                         } else null
                     }
                     Timber.i("MiBand7: supported services (%d): %s", count, endpoints)
@@ -464,6 +536,11 @@ class MiBand7Protocol(
 
             Huami2021Chunked.ENDPOINT_DEVICE_INFO -> {
                 Timber.i("MiBand7: device info  [%s]", payload.toHex())
+            }
+
+            Huami2021Chunked.ENDPOINT_ACTIVITY_FETCH -> {
+                // Fetch metadata over the chunked path (same layout as classic 0x0004)
+                handleFetchControl(payload)
             }
 
             Huami2021Chunked.ENDPOINT_CONFIG -> {
@@ -612,6 +689,18 @@ class MiBand7Protocol(
         syncTime(gatt)
         delay(1_000)
         enableRealtimeSteps(gatt)
+        delay(1_000)
+
+        // Live HR for the dashboard: START once, then CONTINUE every second to keep
+        // the band streaming (Gadgetbridge pattern — without CONTINUE the stream stalls).
+        // Runs as a child of the protocol scope, so it dies with the connection.
+        setHeartRateMonitoring(gatt, continuous = true)
+        scope.launch {
+            while (true) {
+                continueHeartRateStreaming(gatt)
+                delay(1_000)
+            }
+        }
 
         // Poll battery and steps periodically.  Battery is encrypted so it must be polled;
         // steps are also polled as a fallback alongside real-time push notifications.
@@ -621,6 +710,458 @@ class MiBand7Protocol(
             requestCurrentSteps(gatt)
             delay(30_000)
         }
+    }
+
+    /** Keep-alive for the HR stream: fetches the next batch of 0x2A37 samples. */
+    private suspend fun continueHeartRateStreaming(gatt: BluetoothGatt) {
+        writeChunked(gatt, Huami2021Chunked.ENDPOINT_HEARTRATE, byteArrayOf(0x04, 0x02))
+    }
+
+    // ── Sleep history fetch (Huami fetch protocol) ────────────────────────────
+    //
+    // Handshake (control writes go over chunked endpoint 0x004b, encrypted):
+    //   1. Phone → band: [0x01][0x48][timestamp 8B]          (sleep sessions since …)
+    //   2. Band → phone: [0x10][0x01][status][len u32][startTS 8B]
+    //   3. Phone → band: [0x02]                              (begin transfer)
+    //      Band → phone: [counter][payload…] on classic 0x0005 until `len` bytes
+    //   4. Band → phone: [0x10][0x02][status]([crc32])
+    //   5. Phone → band: [0x03][0x01 drop | 0x09 keep]
+    //   6. Band → phone: [0x10][0x03][…]                     (done)
+    //
+    // Control responses arrive on chunked 0x004b and/or classic 0x0004 — both feed
+    // the same metadata handler. Bulk data arrives on classic 0x0005 (raw frames).
+
+    /**
+     * Pull sleep sessions recorded since [sinceMs] (epoch millis).
+     * Returns parsed sessions (possibly empty). Protocol failures yield an empty
+     * list; coroutine cancellation propagates.
+     */
+    suspend fun fetchSleepSessions(sinceMs: Long): List<SleepSessionRecord> =
+        fetchMutex.withLock {
+            if (!isAuthenticated) {
+                Timber.w("MiBand7: sleep fetch requested while not authenticated")
+                return emptyList()
+            }
+            try {
+                val result = fetchRawData(
+                    Huami2021Chunked.FETCH_TYPE_SLEEP_SESSION,
+                    sinceMs
+                ) ?: return emptyList()
+                parseSleepRecords(result.bytes)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Timber.e(e, "MiBand7: sleep fetch failed")
+                emptyList()
+            } finally {
+                fetchPhase = FetchPhase.IDLE
+                fetchMeta = null
+                // Let the band's fetch machine settle before the next dialog.
+                delay(3_000)
+            }
+        }
+
+    /**
+     * Pull historical SpO2 samples (fetch type 0x25) recorded since [sinceMs].
+     * Record layout (Gadgetbridge): `[version=0x02][timestamp u32][spo2 1B][60B]…`.
+     */
+    suspend fun fetchSpo2History(sinceMs: Long): List<SpO2SampleRecord> =
+        fetchMutex.withLock {
+            if (!isAuthenticated) return emptyList()
+            try {
+                val result = fetchRawData(Huami2021Chunked.FETCH_TYPE_SPO2_NORMAL, sinceMs)
+                    ?: return emptyList()
+                parseSpo2Records(result.bytes)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Timber.e(e, "MiBand7: SpO2 fetch failed")
+                emptyList()
+            } finally {
+                fetchPhase = FetchPhase.IDLE
+                fetchMeta = null
+                // Let the band's fetch machine settle before the next dialog.
+                delay(3_000)
+            }
+        }
+
+    /**
+     * Pull automatic stress samples (fetch type 0x13) recorded since [sinceMs].
+     * Layout: minute slots from the transfer start timestamp; `0xFF` = no data
+     * (advance a minute), otherwise the stress score 0–100 for that minute.
+     */
+    suspend fun fetchStressHistory(sinceMs: Long): List<StressSampleRecord> =
+        fetchMutex.withLock {
+            if (!isAuthenticated) return emptyList()
+            try {
+                val result = fetchRawData(Huami2021Chunked.FETCH_TYPE_STRESS_AUTO, sinceMs)
+                    ?: return emptyList()
+                parseStressRecords(result.bytes, result.startTsMs)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Timber.e(e, "MiBand7: stress fetch failed")
+                emptyList()
+            } finally {
+                fetchPhase = FetchPhase.IDLE
+                fetchMeta = null
+                // Let the band's fetch machine settle before the next dialog.
+                delay(3_000)
+            }
+        }
+
+    /** Raw fetch result: reassembled bytes plus the transfer start timestamp (ms). */
+    private data class FetchResult(val bytes: ByteArray, val startTsMs: Long)
+
+    /**
+     * Generic Huami fetch: START_DATE → FETCH_DATA → collect → CRC → ACK.
+     * @return null when the band has no data or any step fails (already logged).
+     */
+    private suspend fun fetchRawData(fetchType: Byte, sinceMs: Long): FetchResult? {
+        val tag = "0x%02x".format(fetchType.toInt() and 0xFF)
+        // 1. START_DATE. The band may first answer with short rejections
+        // ([10 01 05], [10 01 03], …) and only later send the real 15-byte
+        // success — so non-success replies are ignored and we keep waiting
+        // until the deadline instead of failing fast.
+        var meta: ByteArray? = null
+        var attempt = 0
+        val deadlineMs = System.currentTimeMillis() + FETCH_START_TIMEOUT_MS
+        while (meta == null && System.currentTimeMillis() < deadlineMs) {
+            attempt++
+            if (attempt > 1) {
+                // Give the band's fetch state machine time to settle —
+                // rapid-fire START_DATEs get crossed responses.
+                delay(3_000)
+            }
+            Timber.i("MiBand7: requesting fetch type %s (attempt %d)…", tag, attempt)
+            fetchPhase = FetchPhase.AWAIT_START
+            writeFetchControl(
+                byteArrayOf(
+                    Huami2021Chunked.FETCH_CMD_START_DATE,
+                    fetchType,
+                ) + timeBytes(sinceMs)
+            )
+            val remaining = deadlineMs - System.currentTimeMillis()
+            if (remaining <= 0) break
+            val m = awaitFetchMeta(remaining, "start-date[$tag]")
+            if (m == null) {
+                Timber.w("MiBand7: fetch %s start-date attempt %d timed out", tag, attempt)
+                continue
+            }
+            if (m.size >= 7 && m[0] == 0x10.toByte() &&
+                m[1] == Huami2021Chunked.FETCH_CMD_START_DATE && m[2] == Huami2021Chunked.AUTH_SUCCESS
+            ) {
+                meta = m
+            } else {
+                Timber.d("MiBand7: fetch %s ignoring non-success reply [%s]", tag, m.toHex())
+            }
+        }
+        meta ?: return null
+        fetchExpected = u32le(meta, 3)
+        val startTsMs = if (meta.size >= 15) calendarBytesToMs(meta, 7) else sinceMs
+        Timber.i(
+            "MiBand7: fetch %s meta: len=%d tsRaw=[%s] base=%s",
+            tag, fetchExpected,
+            if (meta.size >= 15) meta.copyOfRange(7, 15).toHex() else "?",
+            java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date(startTsMs))
+        )
+        if (fetchExpected == 0) {
+            sendFetchAck(Huami2021Chunked.FETCH_ACK_DROP)
+            awaitFetchMeta(FETCH_ACK_TIMEOUT_MS, "ack")
+            return FetchResult(ByteArray(0), startTsMs)
+        }
+
+        // 2. FETCH_DATA + collect bulk frames
+        fetchBuffer = ByteArrayOutputStream()
+        fetchLastCounter = -1
+        fetchPhase = FetchPhase.COLLECTING
+        writeFetchControl(byteArrayOf(Huami2021Chunked.FETCH_CMD_FETCH_DATA))
+        val resp = try {
+            awaitFetchMeta(FETCH_DATA_TIMEOUT_MS, "fetch-data")
+        } catch (e: Exception) {
+            Timber.w("MiBand7: fetch %s transfer aborted (%s)", tag, e.message)
+            sendFetchAck(Huami2021Chunked.FETCH_ACK_KEEP)
+            return null
+        } ?: run {
+            Timber.w("MiBand7: fetch %s transfer timed out — keeping data on band", tag)
+            sendFetchAck(Huami2021Chunked.FETCH_ACK_KEEP)
+            return null
+        }
+        if (resp.size < 3 || resp[0] != 0x10.toByte() ||
+            resp[1] != Huami2021Chunked.FETCH_CMD_FETCH_DATA || resp[2] != Huami2021Chunked.AUTH_SUCCESS
+        ) {
+            Timber.w("MiBand7: fetch %s unexpected fetch-data response [%s]", tag, resp.toHex())
+            sendFetchAck(Huami2021Chunked.FETCH_ACK_KEEP)
+            return null
+        }
+        val bytes = fetchBuffer.toByteArray()
+        if (resp.size >= 7) {
+            val expected = u32le(resp, 3)
+            if (crc32(bytes) != expected) {
+                Timber.w("MiBand7: fetch %s data CRC mismatch — keeping data on band", tag)
+                sendFetchAck(Huami2021Chunked.FETCH_ACK_KEEP)
+                awaitFetchMeta(FETCH_ACK_TIMEOUT_MS, "ack")
+                return null
+            }
+        }
+        sendFetchAck(Huami2021Chunked.FETCH_ACK_DROP)
+        awaitFetchMeta(FETCH_ACK_TIMEOUT_MS, "ack")
+        return FetchResult(bytes, startTsMs)
+    }
+
+    private suspend fun writeFetchControl(payload: ByteArray) {
+        val g = sessionGatt ?: throw IllegalStateException("no GATT for fetch")
+        Timber.d("MiBand7: fetch control → [%s]", payload.toHex())
+        if (Huami2021Chunked.ENDPOINT_ACTIVITY_FETCH in supportedEndpoints) {
+            // Chunked path (encrypted once authenticated)
+            writeChunked(g, Huami2021Chunked.ENDPOINT_ACTIVITY_FETCH, payload)
+        } else {
+            // Classic path: raw write to the activity-control characteristic (WWR).
+            // Used when the band does not advertise the 0x004b chunked fetch service.
+            val char =
+                activityControl ?: throw IllegalStateException("no activity-control characteristic")
+            writeMutex.withLock {
+                writeRaw(g, char, payload, noResponse = true)
+            }
+        }
+    }
+
+    private suspend fun awaitFetchMeta(timeoutMs: Long, what: String): ByteArray? {
+        val d = CompletableDeferred<ByteArray>()
+        fetchMeta = d
+        return withTimeoutOrNull(timeoutMs) { d.await() } ?: run {
+            Timber.w("MiBand7: sleep fetch '%s' timed out", what)
+            if (fetchMeta === d) fetchMeta = null
+            null
+        }
+    }
+
+    private suspend fun sendFetchAck(ackByte: Byte) {
+        fetchPhase = FetchPhase.AWAIT_ACK
+        writeFetchControl(byteArrayOf(Huami2021Chunked.FETCH_CMD_ACK, ackByte))
+    }
+
+    /** Metadata handler — fed by chunked 0x004b and classic 0x0004 alike. */
+    private fun handleFetchControl(payload: ByteArray) {
+        if (payload.isEmpty() || payload[0] != 0x10.toByte()) {
+            Timber.v("MiBand7: ignoring non-response fetch control [%s]", payload.toHex())
+            return
+        }
+        Timber.d("MiBand7: fetch control ← [%s]", payload.toHex())
+        val waiter = fetchMeta
+        if (waiter != null && fetchPhase != FetchPhase.IDLE) {
+            waiter.complete(payload)
+        } else {
+            Timber.v("MiBand7: fetch control with no waiter (phase=%s)", fetchPhase)
+        }
+    }
+
+    /** Bulk-data handler — raw `[counter][payload…]` frames on classic 0x0005. */
+    private fun handleFetchData(value: ByteArray) {
+        if (fetchPhase != FetchPhase.COLLECTING || value.isEmpty()) return
+        val counter = value[0].toInt() and 0xFF
+        if (counter != ((fetchLastCounter + 1) and 0xFF)) {
+            Timber.w(
+                "MiBand7: fetch data counter jump (got=%d, last=%d) — aborting",
+                counter,
+                fetchLastCounter
+            )
+            fetchPhase = FetchPhase.IDLE
+            fetchMeta?.completeExceptionally(IllegalStateException("counter jump $counter"))
+            return
+        }
+        fetchLastCounter = counter
+        fetchBuffer.write(value, 1, value.size - 1)
+    }
+
+    /** Huami timestamp: [year_lo, year_hi, month, day, hour, min, sec, tzQuarterHours]. */
+    private fun timeBytes(sinceMs: Long): ByteArray {
+        val cal = Calendar.getInstance().apply { timeInMillis = sinceMs }
+        val tzQuarterHours = (cal.timeZone.getOffset(sinceMs) / (15 * 60 * 1000)).toByte()
+        return byteArrayOf(
+            (cal.get(Calendar.YEAR) and 0xFF).toByte(),
+            ((cal.get(Calendar.YEAR) shr 8) and 0xFF).toByte(),
+            (cal.get(Calendar.MONTH) + 1).toByte(),
+            cal.get(Calendar.DATE).toByte(),
+            cal.get(Calendar.HOUR_OF_DAY).toByte(),
+            cal.get(Calendar.MINUTE).toByte(),
+            // Seconds MUST be truncated: Gadgetbridge notes that sending real seconds
+            // causes failures on ZeppOS devices (Amazfit GTR 3 and likely others).
+            0x00,
+            tzQuarterHours,
+        )
+    }
+
+    private fun u16le(a: ByteArray, o: Int): Int =
+        (a[o].toInt() and 0xFF) or ((a[o + 1].toInt() and 0xFF) shl 8)
+
+    private fun u32le(a: ByteArray, o: Int): Int =
+        (a[o].toInt() and 0xFF) or ((a[o + 1].toInt() and 0xFF) shl 8) or
+                ((a[o + 2].toInt() and 0xFF) shl 16) or ((a[o + 3].toInt() and 0xFF) shl 24)
+
+    /**
+     * Parse a Huami calendar timestamp `[y_lo, y_hi, month, day, hour, min, sec, tz]`
+     * at offset [o] into epoch millis. `tz` is the UTC offset in 15-minute units.
+     */
+    private fun calendarBytesToMs(a: ByteArray, o: Int): Long {
+        val year = (a[o].toInt() and 0xFF) or ((a[o + 1].toInt() and 0xFF) shl 8)
+        val tzOffsetSeconds = a[o + 7].toInt() * 900
+        return try {
+            java.time.OffsetDateTime.of(
+                year,
+                a[o + 2].toInt() and 0xFF,
+                a[o + 3].toInt() and 0xFF,
+                a[o + 4].toInt() and 0xFF,
+                a[o + 5].toInt() and 0xFF,
+                a[o + 6].toInt() and 0xFF,
+                0,
+                java.time.ZoneOffset.ofTotalSeconds(tzOffsetSeconds)
+            ).toInstant().toEpochMilli()
+        } catch (e: Exception) {
+            Timber.w(e, "MiBand7: bad calendar bytes [%s]", a.copyOfRange(o, o + 8).toHex())
+            System.currentTimeMillis()
+        }
+    }
+
+    private fun crc32(data: ByteArray): Int {
+        val c = CRC32()
+        c.update(data)
+        return c.value.toInt()
+    }
+
+    /**
+     * Parse 594-byte sleep records: `[tsSession u32][midnight u32][…]`,
+     * detail at 0x0a/0x0c (sleep start/end, minutes), stage table at 0x54
+     * (`[start u16][end u16][type u8]`, minutes since midnight−24h;
+     * types 4=light, 5=deep, 8=REM, 7=awake).
+     */
+    private fun parseSleepRecords(bytes: ByteArray): List<SleepSessionRecord> {
+        if (bytes.size % SLEEP_RECORD_SIZE != 0) {
+            Timber.w(
+                "MiBand7: sleep data length %d not a multiple of %d — parsing whole blocks",
+                bytes.size, SLEEP_RECORD_SIZE
+            )
+        }
+        val out = mutableListOf<SleepSessionRecord>()
+        var o = 0
+        while (o + SLEEP_RECORD_SIZE <= bytes.size) {
+            parseSleepRecord(bytes, o)?.let { out.add(it) }
+            o += SLEEP_RECORD_SIZE
+        }
+        Timber.i("MiBand7: parsed %d sleep session(s)", out.size)
+        return shiftFutureToNow(
+            out,
+            maxTsOf = { s -> maxOf(s.endMs, s.stages.maxOfOrNull { it.endMs } ?: s.endMs) },
+            shift = { s, skewMs ->
+                s.copy(
+                    startMs = s.startMs - skewMs,
+                    endMs = s.endMs - skewMs,
+                    stages = s.stages.map {
+                        it.copy(startMs = it.startMs - skewMs, endMs = it.endMs - skewMs)
+                    }
+                )
+            }
+        )
+    }
+
+    private fun parseSleepRecord(b: ByteArray, o: Int): SleepSessionRecord? {
+        val midnight = u32le(b, o + 4).toLong() and 0xFFFFFFFFL
+        val sleepStartMin = u16le(b, o + 0x0a)
+        val sleepEndMin = u16le(b, o + 0x0c)
+        if (sleepEndMin <= sleepStartMin) return null
+        val base = midnight - 86_400L
+        val startMs = (base + sleepStartMin * 60L) * 1000L
+        val endMs = (base + sleepEndMin * 60L) * 1000L
+        val numStages = b[o + 0x54].toInt() and 0xFF
+        val stages = mutableListOf<SleepStageSample>()
+        for (i in 0 until numStages) {
+            val so = o + 0x56 + 5 * i
+            if (so + 5 > o + SLEEP_RECORD_SIZE) break
+            val s = u16le(b, so)
+            val e = u16le(b, so + 2)
+            val stage = when (b[so + 4].toInt() and 0xFF) {
+                4 -> SleepStage.LIGHT
+                5 -> SleepStage.DEEP
+                8 -> SleepStage.REM
+                7 -> SleepStage.AWAKE
+                else -> null
+            } ?: continue
+            if (e <= s) continue
+            stages.add(SleepStageSample((base + s * 60L) * 1000L, (base + e * 60L) * 1000L, stage))
+        }
+        return SleepSessionRecord(startMs, endMs, stages)
+    }
+
+    /**
+     * Parse SpO2 history: `[version=0x02][timestamp u32][spo2 1B][60B]…` (65 bytes each).
+     * A negative raw byte marks an automatic measurement (value + 128).
+     */
+    private fun parseSpo2Records(bytes: ByteArray): List<SpO2SampleRecord> {
+        if (bytes.isEmpty()) return emptyList()
+        if (bytes[0].toInt() and 0xFF != 0x02) {
+            Timber.w("MiBand7: unexpected SpO2 data version 0x%02x", bytes[0].toInt() and 0xFF)
+            return emptyList()
+        }
+        val out = mutableListOf<SpO2SampleRecord>()
+        var o = 1
+        while (o + 65 <= bytes.size) {
+            val tsSec = u32le(bytes, o).toLong() and 0xFFFFFFFFL
+            val raw = bytes[o + 4].toInt()
+            val percent = if (raw < 0) raw + 128 else raw
+            if (percent in 1..100) {
+                out.add(SpO2SampleRecord(tsSec * 1000L, percent))
+            }
+            o += 65
+        }
+        Timber.i("MiBand7: parsed %d SpO2 sample(s)", out.size)
+        return out
+    }
+
+    /**
+     * Parse automatic stress history: minute slots from [startTsMs].
+     * `0xFF` advances the clock one minute; any other byte is the 0–100 score
+     * for the *current* minute (several scores may share a minute).
+     * Bands: 0–39 relaxed, 40–59 mild, 60–79 moderate, 80–100 high.
+     */
+    private fun parseStressRecords(bytes: ByteArray, startTsMs: Long): List<StressSampleRecord> {
+        Timber.d("MiBand7: stress raw (%dB): [%s]", bytes.size, bytes.toHex())
+        val out = mutableListOf<StressSampleRecord>()
+        var minute = 0
+        for (b in bytes) {
+            val v = b.toInt() and 0xFF
+            if (v == 0xFF) {
+                minute++
+                continue
+            }
+            if (v in 0..100) {
+                out.add(StressSampleRecord(startTsMs + minute * 60_000L, v))
+            }
+        }
+        Timber.i("MiBand7: parsed %d stress sample(s)", out.size)
+        return shiftFutureToNow(
+            out,
+            maxTsOf = { s -> s.timestampMs },
+            shift = { s, skewMs -> s.copy(timestampMs = s.timestampMs - skewMs) }
+        )
+    }
+
+    /**
+     * The band's fetch timestamps are unreliable (varying tz bytes, bases landing
+     * in the future). If a batch's newest sample lies ahead of the phone clock,
+     * shift the whole batch back so it ends now — preserving order and spacing
+     * while keeping health data out of the future (which breaks sorting and age).
+     */
+    private fun <T> shiftFutureToNow(
+        items: List<T>,
+        maxTsOf: (T) -> Long,
+        shift: (T, Long) -> T,
+    ): List<T> {
+        val maxTs = items.maxOfOrNull(maxTsOf) ?: return items
+        val skewMs = maxTs - System.currentTimeMillis()
+        if (skewMs <= 0) return items
+        Timber.w("MiBand7: fetch timestamps %d ms in the future — shifting batch back", skewMs)
+        return items.map { shift(it, skewMs) }
     }
 
     // ── Parsers ───────────────────────────────────────────────────────────────
@@ -744,15 +1285,17 @@ class MiBand7Protocol(
 
     /**
      * Parse a sleep-state event from the heart-rate endpoint (CMD=0x06).
-     * ZeppOS encodes sleep stage as: `[0x06][0x01=Asleep, 0x00=Awake]`.
+     * ZeppOS encodes only the transition: `[0x06][0x01=fell asleep, 0x00=woke up]`.
+     * Sleep onset is recorded as LIGHT (the band does not report depth here).
      */
     private fun parseSleep(p: ByteArray) {
         if (p.size < 2) return
         val stage = when (p[1].toInt() and 0xFF) {
-            0x01 -> SleepStage.DEEP
+            0x01 -> SleepStage.LIGHT
             0x00 -> SleepStage.AWAKE
             else -> null
         } ?: return
+        Timber.i("MiBand7: sleep state → %s", stage)
         scope.launch { _events.emit(DeviceEvent.SleepData(stage)) }
     }
 
@@ -854,7 +1397,9 @@ class MiBand7Protocol(
     }
 
     override suspend fun onSleepTrackingStopped(gatt: BluetoothGatt) {
-        setHeartRateMonitoring(gatt, continuous = false)
+        // NOTE: HR streaming is intentionally left running — the dashboard's 1s CONTINUE
+        // loop owns it while connected; stopping here would blank the dashboard after
+        // every sleep session. Only SpO2 (sleep-specific) is switched off.
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_SPO2, byteArrayOf(0x01, 0x00))
     }
 
@@ -967,6 +1512,10 @@ class MiBand7Protocol(
         cleanupAuth()
         awaitDescriptorWrite = null
         awaitCharacteristicWrite = null
+        sessionGatt = null
+        fetchPhase = FetchPhase.IDLE
+        fetchMeta?.cancel()
+        fetchMeta = null
         scope.cancel()
     }
 

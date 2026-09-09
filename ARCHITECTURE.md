@@ -130,8 +130,9 @@ Uses the **Huami 2021 Extended Header** (a.k.a. ZeppOS chunked-transfer) protoco
 
 #### Authentication (ECDH B-163 + AES-128)
 
-> **Note:** The Mi Band 7 uses ZeppOS firmware and requires the full ECDH handshake
-> described below. This is **not** the older AES-only auth used by Mi Band 4/5/6.
+> **Note:** Modern ZeppOS firmware (Band 7, and Band 6 on current firmware)
+> requires the full ECDH handshake below. Older Band 4/5/6 firmware uses the
+> AES-only challenge-response auth — see [Xiaomi Smart Band 6](#xiaomi-smart-band-6).
 
 1. **Phone → Band** *(endpoint 0x0082)*: phone's B-163 EC public key
    ```
@@ -195,8 +196,114 @@ ACK (phone→band, written to chunkedWrite / 0x0016):
 | `0x001d` | Heart rate                  | No        |
 | `0x0016` | Steps / activity            | No        |
 | `0x0029` | Battery                     | **Yes**   |
-| `0x002d` | Configuration               | **Yes**   |
+| `0x000a` | Configuration               | **Yes**   |
 | `0x001a` | Find device                 | **Yes**   |
+
+---
+
+### Xiaomi Smart Band 6
+
+The Band 6 sits at a protocol transition:
+
+- **Older firmware** uses the classic Huami flow: server-based **Pairing v2** once,
+  then an AES challenge-response **Authentication** on every connect.
+- **Modern firmware** uses the **same ECDH chunked-transfer flow as the Band 7**
+  above — verified live: our test unit authenticates via ECDH on endpoint `0x0082`
+  and then speaks the ZeppOS endpoint set (battery `0x0029`, steps `0x0016`,
+  HR `0x001d`, config `0x000a`, …).
+
+Our `MiBand7Protocol` (Huami 2021 ECDH) therefore drives modern-firmware Band 6
+units. The classic flow below is documented as the fallback
+(Gadgetbridge's `InitOperation2021` tries ECDH first, then challenge-response).
+
+Reference: **BreakMi** — Casagrande et al., *"Reversing, Exploiting and Fixing
+Xiaomi Fitness Tracking Ecosystem"*, TCHES 2022
+([paper](https://tches.iacr.org/index.php/TCHES/article/download/9704/9234),
+[PDF mirror](https://nebelwelt.net/files/22CHES.pdf)).
+
+#### Classic Pairing v2 (server-based, Band 4/5/6)
+
+```
+App → Band : Pairing Init
+Band → App : pair_v2 + SHA1(pub_k)          (truncated digest of band's BT pubkey)
+App → Band : Random Req (820002)
+Band → App : R (16-byte seed, in the clear)
+App        : Key = SHA256(TR_A || R)[0:16]  (TR_A = band's public BT address)
+App ↔ Cloud: send SHA1(pub_k) + base64(Key), receive base64(Sig)
+App → Band : Sig → band verifies → Valid Sig
+…then user confirms on band + app (same as Pairing v1)
+```
+
+#### Classic Authentication (every connect)
+
+```
+App → Band : Auth Req (0200 or 820002)      on Auth char 00000009-… under 0xFEE1
+Band → App : Chal (16 bytes)
+App → Band : Resp = AES-ECB(Key, Chal)
+Band → App : Auth OK (100301 / 108301) or Auth FAIL
+```
+
+Bands 4/5/6 also accept the older Band 2/3 opcodes. Full opcode table (BreakMi Table 2):
+
+| Message           | Sender  | Opcode / Value                     |
+|-------------------|---------|------------------------------------|
+| Pairing Init      | App     | `0100`                             |
+| pair_v1           | Tracker | `100104`                           |
+| Pairing Key       | App     | `0100` + Key                       |
+| Pairing Complete  | Tracker | `100101`                           |
+| Pairing Fail      | Tracker | `100204`                           |
+| pair_v2           | Tracker | `10018101`                         |
+| SHA1(pub_k)       | Tracker | `1863c2cce5d159413bed92c4b163c279` |
+| Random Req        | App     | `820002`                           |
+| Random Resp       | Tracker | `108201` + R                       |
+| User Confirmation | Tracker | `108301`                           |
+| Server Check      | Tracker | `10008401010000`                   |
+| Auth Req          | App     | `0200` or `820002`                 |
+| Auth Chal         | Tracker | `100201`+Chal or `108201`+Chal     |
+| Auth Resp         | App     | `0300`+Resp or `8300`+Resp         |
+| Auth Complete     | Tracker | `100301` or `108301`               |
+| Auth Fail         | Tracker | `100304` or `108307`               |
+
+Pairing v1/v2 messages use the Auth characteristic
+(`00000009-0000-3512-2118-0009af100700`) under service `0xFEE1`; the v2 signature
+goes over the Chunked Transfer characteristic
+(`00000020-0000-3512-2118-0009af100700`) under `0xFEE1`.
+
+#### GATT inventory relevant to Band 6 (BreakMi Tables 6 & 7)
+
+Standard services:
+
+| Service                     | Characteristic                    | Props   | Notes                  |
+|-----------------------------|-----------------------------------|---------|------------------------|
+| Heart Rate `0x180D`         | Measurement `0x2A37`              | N       | all bands              |
+| Heart Rate `0x180D`         | Control Point `0x2A39`            | R, W    | all bands              |
+| Battery `0x180F`            | Level `0x2A19`                    | N, R    | (also ZeppOS fallback) |
+| Alert Notification `0x1811` | Control Point `0x2A44`            | N, R, W | all bands              |
+| Immediate Alert `0x1802`    | Alert Level `0x2A06`              | WWR     | all bands              |
+| Device Info `0x180A`        | Hw/Sw Revision, System ID, PnP ID | R       | all bands              |
+
+Huami vendor service `0000fee0-…` (selected characteristics):
+
+| Characteristic                                     | Props      | Bands                  |
+|----------------------------------------------------|------------|------------------------|
+| Current Time `0x2A2B`                              | N, R, W    | all                    |
+| Chunked Transfer `…00000020…`                      | N, R, WWR  | all                    |
+| Config `…00000003…`                                | N, WWR     | all                    |
+| Activity Data `…00000005…`                         | N          | all                    |
+| Battery `…00000006…`                               | N, R       | all                    |
+| Steps `…00000007…`                                 | N, R       | all                    |
+| User Settings `…00000008…`                         | N, W       | all                    |
+| Auth `…00000009…` (under `0xFEE1`)                 | N, R, WWR  | all                    |
+| Device Event `…00000010…`                          | N          | all                    |
+| `…0000000e…` / `…0000000f…`                        | W / N, WWR | 3, 5, 6                |
+| `…00000011…` / `…00000012…` / `…00000013…` (Audio) | N, R, WWR  | 4, 5, 6                |
+| `…00000016…` (chunked write)                       | N, WWR     | 5 (→ ZeppOS write)     |
+| `…00000017…` (chunked read)                        | N, WWR     | 5, 6 (→ ZeppOS notify) |
+| `…0000fec1…`                                       | N, R, W    | 2, 3, 5, 6             |
+
+Note the `…16`/`…17` rows: on Band 5/6-era firmware these are the same chunked
+pair our ZeppOS implementation uses (`0x0016` write, `0x0017` notify) —
+confirming the Band 6 speaks the Huami-2021 framing once past auth.
 
 ---
 

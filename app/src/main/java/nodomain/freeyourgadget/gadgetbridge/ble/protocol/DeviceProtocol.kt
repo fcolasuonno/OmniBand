@@ -114,8 +114,11 @@ sealed class DeviceEvent {
     data class Steps(val count: Int, val calories: Int = 0, val distance: Float = 0f) : DeviceEvent()
     data class Battery(val percent: Int, val charging: Boolean = false) : DeviceEvent()
     data class SleepData(val stage: SleepStage, val timestamp: Long = System.currentTimeMillis()) : DeviceEvent()
-    data class SpO2(val percent: Int, val timestamp: Long = System.currentTimeMillis()) : DeviceEvent()
-    data class StressLevel(val score: Int, val timestamp: Long = System.currentTimeMillis()) : DeviceEvent()
+    data class SpO2(val percent: Int, val timestamp: Long = System.currentTimeMillis()) :
+        DeviceEvent()
+
+    data class StressLevel(val score: Int, val timestamp: Long = System.currentTimeMillis()) :
+        DeviceEvent()
 
     /**
      * Raw 3-axis accelerometer reading.
@@ -135,6 +138,22 @@ sealed class DeviceEvent {
 }
 
 enum class SleepStage { AWAKE, LIGHT, DEEP, REM }
+
+/** One sleep stage segment with absolute timestamps (ms since epoch). */
+data class SleepStageSample(val startMs: Long, val endMs: Long, val stage: SleepStage)
+
+/** One historical sleep session with absolute timestamps (ms since epoch). */
+data class SleepSessionRecord(
+    val startMs: Long,
+    val endMs: Long,
+    val stages: List<SleepStageSample>,
+)
+
+/** One historical SpO2 sample with absolute timestamp (ms since epoch). */
+data class SpO2SampleRecord(val timestampMs: Long, val percent: Int)
+
+/** One historical stress sample with absolute timestamp (ms since epoch). */
+data class StressSampleRecord(val timestampMs: Long, val score: Int)
 enum class VibratePattern { SHORT, LONG, DOUBLE, ALARM }
 enum class ANCMode { OFF, NOISE_CANCELLING, AMBIENT, WIND_REDUCTION }
 

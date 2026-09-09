@@ -58,6 +58,14 @@ data class SpO2Entity(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+@Entity(tableName = "stress")
+data class StressEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val deviceAddress: String,
+    val score: Int, // 0–100 (0–39 relaxed, 40–59 mild, 60–79 moderate, 80–100 high)
+    val timestamp: Long = System.currentTimeMillis()
+)
+
 @Entity(tableName = "battery_history")
 data class BatteryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

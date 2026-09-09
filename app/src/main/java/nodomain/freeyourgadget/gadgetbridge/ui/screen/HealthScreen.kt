@@ -25,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Bloodtype
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -33,6 +34,7 @@ import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -75,6 +77,7 @@ fun HealthScreen(viewModel: HealthViewModel = hiltViewModel()) {
     val steps       by viewModel.last30DaysSteps.collectAsStateWithLifecycle()
     val spO2List    by viewModel.recentSpO2.collectAsStateWithLifecycle()
     val sleepSessions by viewModel.sleepSessions.collectAsStateWithLifecycle()
+    val sleepSyncing by viewModel.sleepSyncing.collectAsStateWithLifecycle()
 
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf("Heart Rate", "Steps", "Sleep", "SpO2")
@@ -94,7 +97,7 @@ fun HealthScreen(viewModel: HealthViewModel = hiltViewModel()) {
         when (selectedTab) {
             0 -> HeartRateTab(heartRates)
             1 -> StepsTab(steps)
-            2 -> SleepTab(sleepSessions)
+            2 -> SleepTab(sleepSessions, sleepSyncing, onSync = { viewModel.syncHistory() })
             3 -> SpO2Tab(spO2List)
         }
     }
@@ -387,10 +390,23 @@ fun StepDayRow(entity: StepsEntity) {
 // ─────────────────────────────────────────────
 
 @Composable
-fun SleepTab(sessions: List<SleepSessionEntity>) {
-    if (sessions.isEmpty()) {
+fun SleepTab(
+    sessions: List<SleepSessionEntity>,
+    syncing: Boolean = false,
+    onSync: () -> Unit = {},
+) {
+    if (sessions.isEmpty() && !syncing) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            EmptyState(Icons.Filled.Bedtime, "No sleep data recorded.\nEnable Sleep as Android integration in Settings.")
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                EmptyState(
+                    Icons.Filled.Bedtime,
+                    "No sleep data recorded.\nWear the band overnight or enable Sleep as Android integration in Settings."
+                )
+                Button(onClick = onSync) { Text("Sync from Band") }
+            }
         }
         return
     }
@@ -404,7 +420,20 @@ fun SleepTab(sessions: List<SleepSessionEntity>) {
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Text("Recent Sleep Sessions", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Recent Sleep Sessions",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+                TextButton(onClick = onSync, enabled = !syncing) {
+                    Text(if (syncing) "Syncing…" else "Sync")
+                }
+            }
         }
 
         items(sessions) { session ->

@@ -28,6 +28,7 @@ import nodomain.freeyourgadget.gadgetbridge.data.db.entity.HeartRateEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepSessionEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SpO2Entity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.StepsEntity
+import nodomain.freeyourgadget.gadgetbridge.data.db.entity.StressEntity
 import nodomain.freeyourgadget.gadgetbridge.data.repository.DeviceRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.HealthRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.UserPreferencesRepository
@@ -63,8 +64,19 @@ class DashboardViewModel @Inject constructor(
     private val _battery = MutableStateFlow<BatteryEntity?>(null)
     val battery: StateFlow<BatteryEntity?> = _battery.asStateFlow()
 
-    private val _lastSpO2 = MutableStateFlow<Int?>(null)
-    val lastSpO2: StateFlow<Int?> = _lastSpO2.asStateFlow()
+    // SpO2/stress have no live stream on this band — DB-backed so both live saves
+    // and history imports update the cards.
+    val lastSpO2: StateFlow<Int?> = prefs.activeDeviceAddress
+        .filterNotNull()
+        .flatMapLatest { address -> healthRepository.getLatestSpO2(address) }
+        .map { it?.percent }
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
+
+    val lastStress: StateFlow<StressEntity?> = prefs.activeDeviceAddress
+        .filterNotNull()
+        .flatMapLatest { address -> healthRepository.getRecentStress(address) }
+        .map { it.firstOrNull() }
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
     private val _ancMode = MutableStateFlow(ANCMode.OFF)
     val ancMode: StateFlow<ANCMode> = _ancMode.asStateFlow()
@@ -102,7 +114,6 @@ class DashboardViewModel @Inject constructor(
                         percent = event.percent,
                         charging = event.charging
                     )
-                    is DeviceEvent.SpO2      -> _lastSpO2.value = event.percent
                     is DeviceEvent.AncMode   -> _ancMode.value = event.mode
                     else -> Unit
                 }
@@ -170,7 +181,8 @@ class ScanViewModel @Inject constructor(
 @HiltViewModel
 class HealthViewModel @Inject constructor(
     private val healthRepository: HealthRepository,
-    private val prefs: UserPreferencesRepository
+    private val prefs: UserPreferencesRepository,
+    private val bleManager: BleManager
 ) : ViewModel() {
 
     private val activeAddress: Flow<String?> = prefs.activeDeviceAddress
@@ -194,6 +206,39 @@ class HealthViewModel @Inject constructor(
         .filterNotNull()
         .flatMapLatest { healthRepository.getRecentSleepSessions(it) }
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    private val _sleepSyncing = MutableStateFlow(false)
+    val sleepSyncing: StateFlow<Boolean> = _sleepSyncing.asStateFlow()
+
+    /** Manually pull recorded history (sleep, SpO2, stress) from the band. */
+    fun syncHistory() {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (_sleepSyncing.value) return@launch
+            _sleepSyncing.value = true
+            try {
+                val address = prefs.activeDeviceAddress.first() ?: return@launch
+                val now = System.currentTimeMillis()
+                val last = prefs.lastHistoryFetchMs.first()
+                val since = maxOf(if (last > 0) last else 0L, now - 7L * 24 * 3600 * 1000)
+                bleManager.withHistorySyncLock {
+                    bleManager.fetchSleepHistory(since).forEach { s ->
+                        healthRepository.importSleepSession(address, s.startMs, s.endMs, s.stages)
+                    }
+                    bleManager.fetchSpo2History(since).forEach { s ->
+                        healthRepository.importSpO2At(address, s.percent, s.timestampMs)
+                    }
+                    bleManager.fetchStressHistory(since).forEach { s ->
+                        healthRepository.importStressAt(address, s.score, s.timestampMs)
+                    }
+                }
+                prefs.setLastHistoryFetchMs(now)
+            } catch (e: Exception) {
+                android.util.Log.w("HealthViewModel", "history sync failed", e)
+            } finally {
+                _sleepSyncing.value = false
+            }
+        }
+    }
 }
 
 // =====================================================================
