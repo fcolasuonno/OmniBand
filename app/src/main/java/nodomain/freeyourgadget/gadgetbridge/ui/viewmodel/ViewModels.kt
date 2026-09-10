@@ -27,12 +27,14 @@ import nodomain.freeyourgadget.gadgetbridge.ble.protocol.DeviceEvent
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.BatteryEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.DeviceEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.HeartRateEntity
+import nodomain.freeyourgadget.gadgetbridge.data.db.entity.NotificationLogEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepSessionEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SpO2Entity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.StepsEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.StressEntity
 import nodomain.freeyourgadget.gadgetbridge.data.repository.DeviceRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.HealthRepository
+import nodomain.freeyourgadget.gadgetbridge.data.repository.NotificationLogRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.UserPreferencesRepository
 import nodomain.freeyourgadget.gadgetbridge.service.DeviceService
 import java.text.SimpleDateFormat
@@ -301,7 +303,8 @@ class SettingsViewModel @Inject constructor(
 @HiltViewModel
 class NotificationsViewModel @Inject constructor(
     private val app: Application,
-    private val prefs: UserPreferencesRepository
+    private val prefs: UserPreferencesRepository,
+    private val logRepo: NotificationLogRepository
 ) : ViewModel() {
 
     data class NotifApp(
@@ -377,6 +380,24 @@ class NotificationsViewModel @Inject constructor(
 
     fun setAppEnabled(packageName: String, enabled: Boolean) {
         viewModelScope.launch { prefs.setAppNotifEnabled(packageName, enabled) }
+    }
+
+    val history: StateFlow<List<NotificationLogEntity>> = logRepo.recent()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+
+    val blocklist: StateFlow<Set<String>> = prefs.notifBlocklist
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
+    fun addBlocklistEntry(entry: String) {
+        viewModelScope.launch { prefs.addNotifBlocklistEntry(entry) }
+    }
+
+    fun removeBlocklistEntry(entry: String) {
+        viewModelScope.launch { prefs.removeNotifBlocklistEntry(entry) }
+    }
+
+    fun clearHistory() {
+        viewModelScope.launch { logRepo.clearAll() }
     }
 
     val quietHoursEnabled: StateFlow<Boolean> = prefs.quietHoursEnabled

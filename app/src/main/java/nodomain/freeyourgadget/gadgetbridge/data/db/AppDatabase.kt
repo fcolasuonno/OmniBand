@@ -7,6 +7,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.BatteryDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.DeviceDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.HeartRateDao
+import nodomain.freeyourgadget.gadgetbridge.data.db.dao.NotificationLogDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.SleepDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.SpO2Dao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StepsDao
@@ -14,6 +15,7 @@ import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StressDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.BatteryEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.DeviceEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.HeartRateEntity
+import nodomain.freeyourgadget.gadgetbridge.data.db.entity.NotificationLogEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepSessionEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepStageEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SpO2Entity
@@ -51,6 +53,23 @@ val MIGRATION_3_4 = object : Migration(3, 4) {
     }
 }
 
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `notification_log` (" +
+                    "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`packageName` TEXT NOT NULL, " +
+                    "`appName` TEXT NOT NULL, " +
+                    "`title` TEXT NOT NULL, " +
+                    "`body` TEXT NOT NULL, " +
+                    "`postTime` INTEGER NOT NULL, " +
+                    "`receivedAt` INTEGER NOT NULL, " +
+                    "`forwarded` INTEGER NOT NULL, " +
+                    "`skipReason` TEXT)"
+        )
+    }
+}
+
 @Database(
     entities = [
         DeviceEntity::class,
@@ -60,9 +79,10 @@ val MIGRATION_3_4 = object : Migration(3, 4) {
         SleepStageEntity::class,
         SpO2Entity::class,
         BatteryEntity::class,
-        StressEntity::class
+        StressEntity::class,
+        NotificationLogEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -73,4 +93,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun spo2Dao(): SpO2Dao
     abstract fun batteryDao(): BatteryDao
     abstract fun stressDao(): StressDao
+    abstract fun notificationLogDao(): NotificationLogDao
 }

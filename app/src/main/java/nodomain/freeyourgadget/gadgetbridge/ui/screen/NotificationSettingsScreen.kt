@@ -101,6 +101,11 @@ fun NotificationSettingsScreen(
                     IconButton(onClick = { navController.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
                     }
+                },
+                actions = {
+                    TextButton(onClick = { navController.navigate("notification_history") }) {
+                        Text("History")
+                    }
                 }
             )
         }

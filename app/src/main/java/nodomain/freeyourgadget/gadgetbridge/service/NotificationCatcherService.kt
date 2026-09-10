@@ -12,6 +12,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import nodomain.freeyourgadget.gadgetbridge.ble.BleManager
+import nodomain.freeyourgadget.gadgetbridge.data.repository.NotificationLogRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.UserPreferencesRepository
 import timber.log.Timber
 import javax.inject.Inject
@@ -23,6 +24,10 @@ import javax.inject.Inject
  * delivers posted/removed notifications here. Only packages enabled in
  * [UserPreferencesRepository.enabledNotifApps] are mirrored, and only when the
  * master toggle ([UserPreferencesRepository.notifMirrorEnabled]) is on.
+ * Blocklisted texts ([UserPreferencesRepository.notifBlocklist]) are skipped.
+ *
+ * Every processed notification is recorded in [NotificationLogRepository]
+ * (pruned after 10 days) for the history screen.
  *
  * Ongoing notifications, group summaries and our own app's notifications are
  * never mirrored.
@@ -34,6 +39,9 @@ class NotificationCatcherService : NotificationListenerService() {
     lateinit var bleManager: BleManager
     @Inject
     lateinit var prefs: UserPreferencesRepository
+
+    @Inject
+    lateinit var logRepo: NotificationLogRepository
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -47,11 +55,11 @@ class NotificationCatcherService : NotificationListenerService() {
     private val recentForwards = LinkedHashMap<String, Forwarded>()
 
     /**
-     * Identical text re-posted within this window is treated as a replay.
-     * Kept short so legitimate repeats (e.g. reminder apps) still come through.
+     * Identical text re-posted within this window is treated as a replay, even under
+     * a different notification id or with a refreshed post time.
      */
     private companion object {
-        const val CONTENT_DEDUP_WINDOW_MS = 5 * 60 * 1000L
+        const val CONTENT_DEDUP_WINDOW_MS = 30 * 60 * 1000L
         const val STALE_NOTIF_AGE_MS = 10 * 60 * 1000L
         const val MAX_TRACKED_KEYS = 200
     }
@@ -63,24 +71,56 @@ class NotificationCatcherService : NotificationListenerService() {
         if ((notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return
 
         scope.launch {
-            if (!prefs.notifMirrorEnabled.first()) return@launch
-            if (isQuietNow()) {
-                Timber.v("NotificationCatcher: quiet hours — skipping #%d", sbn.id)
-                return@launch
-            }
-            if (sbn.packageName !in prefs.enabledNotifApps.first()) {
-                Timber.v("NotificationCatcher: %s not enabled — skipping", sbn.packageName)
-                return@launch
-            }
             val extras: Bundle = notification.extras
             val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
             val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
                 ?: extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString().orEmpty()
+            val appName = try {
+                packageManager.getApplicationLabel(
+                    packageManager.getApplicationInfo(sbn.packageName, 0)
+                ).toString()
+            } catch (e: Exception) {
+                sbn.packageName
+            }
+
+            suspend fun record(forwarded: Boolean, reason: String?) {
+                logRepo.log(
+                    sbn.packageName, appName, title, text,
+                    sbn.postTime, forwarded, reason
+                )
+            }
+
+            if (!prefs.notifMirrorEnabled.first()) {
+                record(false, "mirroring-off")
+                return@launch
+            }
+            if (isQuietNow()) {
+                Timber.v("NotificationCatcher: quiet hours — skipping #%d", sbn.id)
+                record(false, "quiet-hours")
+                return@launch
+            }
+            if (sbn.packageName !in prefs.enabledNotifApps.first()) {
+                Timber.v("NotificationCatcher: %s not enabled — skipping", sbn.packageName)
+                record(false, "disabled-app")
+                return@launch
+            }
+            if (prefs.isBlocklisted(
+                    sbn.packageName, title, text, prefs.notifBlocklist.first()
+                )
+            ) {
+                Timber.i(
+                    "NotificationCatcher: blocklisted #%d from %s — skipping",
+                    sbn.id, sbn.packageName
+                )
+                record(false, "blacklisted")
+                return@launch
+            }
             if (title.isBlank() && text.isBlank()) {
                 Timber.v(
                     "NotificationCatcher: empty notification from %s — skipping",
                     sbn.packageName
                 )
+                record(false, "empty")
                 return@launch
             }
             val dedupKey = "${sbn.packageName}|${title.hashCode()}|${text.hashCode()}"
@@ -92,6 +132,7 @@ class NotificationCatcherService : NotificationListenerService() {
                     "NotificationCatcher: stale notification #%d from %s (age %dm) — skipping",
                     sbn.id, sbn.packageName, (nowMs - sbn.postTime) / 60_000
                 )
+                record(false, "stale")
                 return@launch
             }
             val isDupe = synchronized(recentForwards) {
@@ -104,14 +145,8 @@ class NotificationCatcherService : NotificationListenerService() {
                     "NotificationCatcher: re-post of recent text from %s — skipping",
                     sbn.packageName
                 )
+                record(false, "duplicate")
                 return@launch
-            }
-            val appName = try {
-                packageManager.getApplicationLabel(
-                    packageManager.getApplicationInfo(sbn.packageName, 0)
-                ).toString()
-            } catch (e: Exception) {
-                sbn.packageName
             }
             Timber.i(
                 "NotificationCatcher: mirroring #%d from %s: %s",
@@ -123,6 +158,7 @@ class NotificationCatcherService : NotificationListenerService() {
                     recentForwards.remove(recentForwards.keys.first())
                 }
             }
+            record(true, null)
             bleManager.sendNotification(sbn.id, sbn.packageName, title, text, appName)
         }
     }

@@ -66,6 +66,19 @@ data class StressEntity(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+@Entity(tableName = "notification_log")
+data class NotificationLogEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val packageName: String,
+    val appName: String,
+    val title: String,
+    val body: String,
+    val postTime: Long,
+    val receivedAt: Long = System.currentTimeMillis(),
+    val forwarded: Boolean,
+    val skipReason: String? = null // e.g. "disabled-app", "quiet-hours", "duplicate", "stale", "blacklisted", "empty"
+)
+
 @Entity(tableName = "battery_history")
 data class BatteryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

@@ -18,6 +18,7 @@ import nodomain.freeyourgadget.gadgetbridge.ble.protocol.SleepStageSample
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.BatteryDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.DeviceDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.HeartRateDao
+import nodomain.freeyourgadget.gadgetbridge.data.db.dao.NotificationLogDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.SleepDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.SpO2Dao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StepsDao
@@ -25,11 +26,13 @@ import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StressDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.BatteryEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.DeviceEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.HeartRateEntity
+import nodomain.freeyourgadget.gadgetbridge.data.db.entity.NotificationLogEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepSessionEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepStageEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SpO2Entity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.StepsEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.StressEntity
+import nodomain.freeyourgadget.gadgetbridge.data.repository.NotificationLogRepository.Companion.RETENTION_MS
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -261,6 +264,7 @@ class UserPreferencesRepository @Inject constructor(
 
         val NOTIF_MIRROR_ENABLED = booleanPreferencesKey("notif_mirror_enabled")
         val NOTIF_ENABLED_APPS = stringSetPreferencesKey("notif_enabled_apps")
+        val NOTIF_BLOCKLIST = stringSetPreferencesKey("notif_blocklist")
         val QUIET_HOURS_ENABLED = booleanPreferencesKey("quiet_hours_enabled")
         val QUIET_HOURS_START_MIN = intPreferencesKey("quiet_hours_start_min")
         val QUIET_HOURS_END_MIN = intPreferencesKey("quiet_hours_end_min")
@@ -272,6 +276,14 @@ class UserPreferencesRepository @Inject constructor(
             "com.google.android.gm", // Gmail
             "com.whatsapp",          // WhatsApp
             "com.slack"              // Slack
+        )
+
+        /**
+         * Default blocklist entries (`package|substring`, substring matched
+         * case-insensitively against title+body).
+         */
+        val DEFAULT_NOTIF_BLOCKLIST = setOf(
+            "io.homeassistant.companion.android|updating sensors"
         )
     }
 
@@ -355,6 +367,44 @@ class UserPreferencesRepository @Inject constructor(
         }
     }
 
+    val notifBlocklist: Flow<Set<String>> = context.dataStore.data
+        .map { it[Keys.NOTIF_BLOCKLIST] ?: DEFAULT_NOTIF_BLOCKLIST }
+
+    suspend fun addNotifBlocklistEntry(entry: String) {
+        val trimmed = entry.trim()
+        if (trimmed.isEmpty()) return
+        context.dataStore.edit { prefs ->
+            prefs[Keys.NOTIF_BLOCKLIST] =
+                (prefs[Keys.NOTIF_BLOCKLIST] ?: DEFAULT_NOTIF_BLOCKLIST) + trimmed
+        }
+    }
+
+    suspend fun removeNotifBlocklistEntry(entry: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.NOTIF_BLOCKLIST] =
+                (prefs[Keys.NOTIF_BLOCKLIST] ?: DEFAULT_NOTIF_BLOCKLIST) - entry
+        }
+    }
+
+    /**
+     * Whether a notification is blocklisted. Entries are `package` (blocks the whole
+     * app) or `package|substring` (blocks texts containing the substring,
+     * case-insensitive).
+     */
+    fun isBlocklisted(
+        packageName: String,
+        title: String,
+        body: String,
+        blocklist: Set<String>
+    ): Boolean {
+        val haystack = "$title $body"
+        return blocklist.any { entry ->
+            val parts = entry.split("|", limit = 2)
+            if (parts[0] != packageName) return@any false
+            parts.size == 1 || haystack.contains(parts[1], ignoreCase = true)
+        }
+    }
+
     val quietHoursEnabled: Flow<Boolean> = context.dataStore.data
         .map { it[Keys.QUIET_HOURS_ENABLED] ?: false }
 
@@ -383,4 +433,50 @@ class UserPreferencesRepository @Inject constructor(
     fun isQuietNow(nowMin: Int, startMin: Int, endMin: Int): Boolean =
         if (startMin <= endMin) nowMin in startMin until endMin
         else nowMin >= startMin || nowMin < endMin
+}
+
+// =====================================================================
+// Notification history log
+// =====================================================================
+
+/**
+ * Persists every notification the catcher sees (mirrored or skipped, with reason).
+ * Rows older than [RETENTION_MS] are pruned on every insert.
+ */
+@Singleton
+class NotificationLogRepository @Inject constructor(
+    private val notificationLogDao: NotificationLogDao
+) {
+    companion object {
+        const val RETENTION_MS = 10L * 24 * 60 * 60 * 1000
+    }
+
+    fun recent(): Flow<List<NotificationLogEntity>> = notificationLogDao.getRecent()
+
+    suspend fun log(
+        packageName: String,
+        appName: String,
+        title: String,
+        body: String,
+        postTime: Long,
+        forwarded: Boolean,
+        skipReason: String? = null
+    ) {
+        val now = System.currentTimeMillis()
+        notificationLogDao.insert(
+            NotificationLogEntity(
+                packageName = packageName,
+                appName = appName,
+                title = title,
+                body = body,
+                postTime = postTime,
+                receivedAt = now,
+                forwarded = forwarded,
+                skipReason = skipReason
+            )
+        )
+        notificationLogDao.pruneOlderThan(now - RETENTION_MS)
+    }
+
+    suspend fun clearAll() = notificationLogDao.clearAll()
 }

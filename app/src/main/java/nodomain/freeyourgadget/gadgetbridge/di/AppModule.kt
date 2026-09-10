@@ -11,15 +11,18 @@ import nodomain.freeyourgadget.gadgetbridge.data.db.AppDatabase
 import nodomain.freeyourgadget.gadgetbridge.data.db.MIGRATION_1_2
 import nodomain.freeyourgadget.gadgetbridge.data.db.MIGRATION_2_3
 import nodomain.freeyourgadget.gadgetbridge.data.db.MIGRATION_3_4
+import nodomain.freeyourgadget.gadgetbridge.data.db.MIGRATION_4_5
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.BatteryDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.DeviceDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.HeartRateDao
+import nodomain.freeyourgadget.gadgetbridge.data.db.dao.NotificationLogDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.SleepDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.SpO2Dao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StepsDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StressDao
 import nodomain.freeyourgadget.gadgetbridge.data.repository.DeviceRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.HealthRepository
+import nodomain.freeyourgadget.gadgetbridge.data.repository.NotificationLogRepository
 import javax.inject.Singleton
 
 @Module
@@ -30,7 +33,7 @@ object DatabaseModule {
     @Provides
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "freeyourgadget.gadgetbridge.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .fallbackToDestructiveMigration(dropAllTables = true)
             .build()
 
@@ -42,6 +45,10 @@ object DatabaseModule {
     @Provides fun provideBatteryDao(db: AppDatabase): BatteryDao = db.batteryDao()
     @Provides
     fun provideStressDao(db: AppDatabase): StressDao = db.stressDao()
+
+    @Provides
+    fun provideNotificationLogDao(db: AppDatabase): NotificationLogDao =
+        db.notificationLogDao()
 }
 
 @Module
@@ -64,4 +71,10 @@ object RepositoryModule {
         stressDao: StressDao
     ): HealthRepository =
         HealthRepository(heartRateDao, stepsDao, sleepDao, spo2Dao, batteryDao, stressDao)
+
+    @Singleton
+    @Provides
+    fun provideNotificationLogRepository(
+        notificationLogDao: NotificationLogDao
+    ): NotificationLogRepository = NotificationLogRepository(notificationLogDao)
 }

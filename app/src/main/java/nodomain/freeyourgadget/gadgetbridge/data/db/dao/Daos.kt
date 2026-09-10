@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.Flow
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.BatteryEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.DeviceEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.HeartRateEntity
+import nodomain.freeyourgadget.gadgetbridge.data.db.entity.NotificationLogEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepSessionEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepStageEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SpO2Entity
@@ -130,6 +131,21 @@ interface StressDao {
 
     @Insert
     suspend fun insert(entity: StressEntity)
+}
+
+@Dao
+interface NotificationLogDao {
+    @Query("SELECT * FROM notification_log ORDER BY receivedAt DESC LIMIT 200")
+    fun getRecent(): Flow<List<NotificationLogEntity>>
+
+    @Insert
+    suspend fun insert(entity: NotificationLogEntity)
+
+    @Query("DELETE FROM notification_log WHERE receivedAt < :cutoffMs")
+    suspend fun pruneOlderThan(cutoffMs: Long)
+
+    @Query("DELETE FROM notification_log")
+    suspend fun clearAll()
 }
 
 @Dao
