@@ -152,6 +152,12 @@ class MiBand7Protocol(
         /** How often to re-send the ECDH public key while waiting for the band's reply. */
         private const val ECDH_RETRY_MS = 5_000L
 
+        /** HR CONTINUE cadence while the app is foregrounded or SaA tracks. */
+        const val HR_CONTINUE_FAST_MS = 10_000L
+
+        /** HR CONTINUE cadence in background to save battery (liveness watched in logs). */
+        const val HR_CONTINUE_SLOW_MS = 120_000L
+
         /**
          * Default ASCII auth key used by some ZeppOS devices before a custom key is set.
          * The bytes spell "0123456789@ABCDE".
@@ -194,6 +200,10 @@ class MiBand7Protocol(
     /** Monotonically increasing sequence counter embedded in encrypted payloads. */
     @Volatile
     private var encryptedSeq: Int = 0
+
+    /** HR CONTINUE interval, pushed by BleManager (fast foreground/tracking, slow otherwise). */
+    @Volatile
+    var hrContinueIntervalMs: Long = HR_CONTINUE_FAST_MS
 
     /** Serialises all GATT write operations (Android only allows one in-flight at a time). */
     private val writeMutex = Mutex()
@@ -813,24 +823,30 @@ class MiBand7Protocol(
         enableRealtimeSteps(gatt)
         delay(1_000)
 
-        // Live HR for the dashboard: START once, then CONTINUE every second to keep
-        // the band streaming (Gadgetbridge pattern — without CONTINUE the stream stalls).
+        // Live HR for the dashboard: START once, then CONTINUE on an adaptive interval
+        // to keep the band streaming (Gadgetbridge pattern — without CONTINUE the stream
+        // stalls). Fast (1 s) while the app is foregrounded or Sleep as Android tracks;
+        // slow (30 s) otherwise to save battery on both sides. The interval is pushed
+        // by BleManager and read fresh every iteration.
         // Runs as a child of the protocol scope, so it dies with the connection.
         setHeartRateMonitoring(gatt, continuous = true)
         scope.launch {
             while (true) {
                 continueHeartRateStreaming(gatt)
-                delay(1_000)
+                delay(hrContinueIntervalMs)
             }
         }
 
-        // Poll battery and steps periodically.  Battery is encrypted so it must be polled;
-        // steps are also polled as a fallback alongside real-time push notifications.
+        // Poll battery and steps periodically. Battery is encrypted so it must be polled,
+        // but it drains slowly — every 30th cycle (~15 min) is plenty. Steps are polled
+        // every 10th cycle (~5 min) as a fallback alongside real-time push notifications.
+        var pollCount = 0
         while (true) {
-            requestBattery(gatt)
+            if (pollCount % 30 == 0) requestBattery(gatt)
             delay(1_000)
-            requestCurrentSteps(gatt)
+            if (pollCount % 10 == 0) requestCurrentSteps(gatt)
             delay(30_000)
+            pollCount++
         }
     }
 

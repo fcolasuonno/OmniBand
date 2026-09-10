@@ -38,18 +38,22 @@ class NotificationCatcherService : NotificationListenerService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
-     * Recently forwarded content per notification key (`package|id`), to suppress
-     * re-posts of identical text (apps often re-post/update the same notification,
-     * which would otherwise buzz the band again for an old message).
+     * Recently forwarded content, to suppress re-posts (apps often re-post or update
+     * the same notification with a new id, which would otherwise buzz the band again
+     * for an old message). Keyed by content, not id.
      */
-    private data class Forwarded(val title: String, val body: String, val atMs: Long)
+    private data class Forwarded(val atMs: Long)
 
     private val recentForwards = LinkedHashMap<String, Forwarded>()
 
-    /** Identical content forwarded within this window is treated as a re-post. */
+    /**
+     * Identical text re-posted within this window is treated as a replay.
+     * Kept short so legitimate repeats (e.g. reminder apps) still come through.
+     */
     private companion object {
-        const val DEDUP_WINDOW_MS = 10 * 60 * 1000L
-        const val MAX_TRACKED_KEYS = 100
+        const val CONTENT_DEDUP_WINDOW_MS = 5 * 60 * 1000L
+        const val STALE_NOTIF_AGE_MS = 10 * 60 * 1000L
+        const val MAX_TRACKED_KEYS = 200
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
@@ -79,17 +83,26 @@ class NotificationCatcherService : NotificationListenerService() {
                 )
                 return@launch
             }
-            val dedupKey = "${sbn.packageName}|${sbn.id}"
+            val dedupKey = "${sbn.packageName}|${title.hashCode()}|${text.hashCode()}"
+            val nowMs = System.currentTimeMillis()
+            // Stale re-posts: the message itself is old (original post time long past),
+            // even if Android just (re-)delivered it now.
+            if (sbn.postTime > 0 && nowMs - sbn.postTime > STALE_NOTIF_AGE_MS) {
+                Timber.i(
+                    "NotificationCatcher: stale notification #%d from %s (age %dm) — skipping",
+                    sbn.id, sbn.packageName, (nowMs - sbn.postTime) / 60_000
+                )
+                return@launch
+            }
             val isDupe = synchronized(recentForwards) {
                 recentForwards[dedupKey]?.let { prev ->
-                    prev.title == title && prev.body == text &&
-                            System.currentTimeMillis() - prev.atMs < DEDUP_WINDOW_MS
+                    nowMs - prev.atMs < CONTENT_DEDUP_WINDOW_MS
                 } ?: false
             }
             if (isDupe) {
                 Timber.i(
-                    "NotificationCatcher: re-post of recent #%d from %s — skipping",
-                    sbn.id, sbn.packageName
+                    "NotificationCatcher: re-post of recent text from %s — skipping",
+                    sbn.packageName
                 )
                 return@launch
             }
@@ -105,8 +118,7 @@ class NotificationCatcherService : NotificationListenerService() {
                 sbn.id, sbn.packageName, title.take(60)
             )
             synchronized(recentForwards) {
-                recentForwards["${sbn.packageName}|${sbn.id}"] =
-                    Forwarded(title, text, System.currentTimeMillis())
+                recentForwards[dedupKey] = Forwarded(System.currentTimeMillis())
                 while (recentForwards.size > MAX_TRACKED_KEYS) {
                     recentForwards.remove(recentForwards.keys.first())
                 }

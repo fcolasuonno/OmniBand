@@ -139,6 +139,14 @@ class BleManager @Inject constructor(
         const val MAX_INIT_FAILURES = 3
     }
 
+    // ── Adaptive HR CONTINUE rate ─────────────────────────────────────────────
+    @Volatile
+    private var sleepTrackingActive = false
+    @Volatile
+    private var appForeground = false
+    @Volatile
+    private var lastPushedHrIntervalMs = -1L
+
     /**
      * One-shot channels that carry GATT operation completions from the callback thread to the
      * initialisation coroutine. Recreated on every new connection so stale signals from a
@@ -424,6 +432,10 @@ class BleManager @Inject constructor(
                     val protocol = createProtocol(targetDeviceType!!)
                     activeProtocol?.destroy()
                     activeProtocol = protocol
+                    // Fresh protocol starts on the default interval — push the current
+                    // adaptive rate before initialization runs its HR loop.
+                    lastPushedHrIntervalMs = -1
+                    updateHrContinueRate()
 
                     if (protocol is MiBand7Protocol) {
                         protocol.onMtuNegotiated(negotiatedMtu)
@@ -682,11 +694,46 @@ class BleManager @Inject constructor(
     }
 
     suspend fun onSleepTrackingStarted() {
+        sleepTrackingActive = true
+        updateHrContinueRate()
         activeGatt?.let { activeProtocol?.onSleepTrackingStarted(it) }
     }
 
     suspend fun onSleepTrackingStopped() {
+        sleepTrackingActive = false
+        updateHrContinueRate()
         activeGatt?.let { activeProtocol?.onSleepTrackingStopped(it) }
+    }
+
+    /**
+     * Called by the app lifecycle observer: true while any activity is visible.
+     * Drives the adaptive HR CONTINUE rate together with [sleepTrackingActive].
+     */
+    fun setAppForeground(foreground: Boolean) {
+        if (appForeground == foreground) return
+        appForeground = foreground
+        updateHrContinueRate()
+    }
+
+    /**
+     * Push the adaptive HR CONTINUE interval to the protocol. Fast (1 s) while the
+     * app is foregrounded or Sleep as Android tracks; slow (30 s) otherwise.
+     */
+    private fun updateHrContinueRate() {
+        val fast = appForeground || sleepTrackingActive
+        val interval = if (fast) {
+            MiBand7Protocol.HR_CONTINUE_FAST_MS
+        } else {
+            MiBand7Protocol.HR_CONTINUE_SLOW_MS
+        }
+        if (interval != lastPushedHrIntervalMs) {
+            lastPushedHrIntervalMs = interval
+            (activeProtocol as? MiBand7Protocol)?.hrContinueIntervalMs = interval
+            Timber.d(
+                "BleManager: HR CONTINUE rate → %d ms (foreground=%s, sleepTracking=%s)",
+                interval, appForeground, sleepTrackingActive
+            )
+        }
     }
 
     suspend fun triggerAlarm() {
