@@ -857,11 +857,21 @@ class MiBand7Protocol(
      * Pull sleep sessions recorded since [sinceMs] (epoch millis).
      * Returns parsed sessions (possibly empty). Protocol failures yield an empty
      * list; coroutine cancellation propagates.
+     *
+     * Note: sleep fetch (type 0x48) is only attempted over the chunked 0x004b
+     * service. This band does not advertise 0x004b and rejects 0x48 on the
+     * classic path (`[10 01 03]`), so the fetch is skipped fast instead of
+     * burning a 60 s timeout on every sync. Live fall-asleep/wake-up events
+     * (0x001D) remain the working sleep source on this firmware.
      */
     suspend fun fetchSleepSessions(sinceMs: Long): List<SleepSessionRecord> =
         fetchMutex.withLock {
             if (!isAuthenticated) {
                 Timber.w("MiBand7: sleep fetch requested while not authenticated")
+                return emptyList()
+            }
+            if (Huami2021Chunked.ENDPOINT_ACTIVITY_FETCH !in supportedEndpoints) {
+                Timber.i("MiBand7: no 0x004b service — skipping sleep fetch (live events only)")
                 return emptyList()
             }
             try {

@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
@@ -260,6 +261,9 @@ class UserPreferencesRepository @Inject constructor(
 
         val NOTIF_MIRROR_ENABLED = booleanPreferencesKey("notif_mirror_enabled")
         val NOTIF_ENABLED_APPS = stringSetPreferencesKey("notif_enabled_apps")
+        val QUIET_HOURS_ENABLED = booleanPreferencesKey("quiet_hours_enabled")
+        val QUIET_HOURS_START_MIN = intPreferencesKey("quiet_hours_start_min")
+        val QUIET_HOURS_END_MIN = intPreferencesKey("quiet_hours_end_min")
     }
 
     companion object {
@@ -350,4 +354,33 @@ class UserPreferencesRepository @Inject constructor(
                 if (enabled) current + packageName else current - packageName
         }
     }
+
+    val quietHoursEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[Keys.QUIET_HOURS_ENABLED] ?: false }
+
+    /** Minutes since midnight; defaults 23:30 → 07:00. */
+    val quietHoursStartMin: Flow<Int> = context.dataStore.data
+        .map { it[Keys.QUIET_HOURS_START_MIN] ?: (23 * 60 + 30) }
+
+    val quietHoursEndMin: Flow<Int> = context.dataStore.data
+        .map { it[Keys.QUIET_HOURS_END_MIN] ?: (7 * 60) }
+
+    suspend fun setQuietHoursEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.QUIET_HOURS_ENABLED] = enabled }
+    }
+
+    suspend fun setQuietHours(startMin: Int, endMin: Int) {
+        context.dataStore.edit {
+            it[Keys.QUIET_HOURS_START_MIN] = startMin.coerceIn(0, 1439)
+            it[Keys.QUIET_HOURS_END_MIN] = endMin.coerceIn(0, 1439)
+        }
+    }
+
+    /**
+     * Whether [nowMin] (minutes since midnight) falls inside the quiet window.
+     * Handles overnight windows where start > end (e.g. 23:30 → 07:00).
+     */
+    fun isQuietNow(nowMin: Int, startMin: Int, endMin: Int): Boolean =
+        if (startMin <= endMin) nowMin in startMin until endMin
+        else nowMin >= startMin || nowMin < endMin
 }

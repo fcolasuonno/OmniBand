@@ -37,6 +37,21 @@ class NotificationCatcherService : NotificationListenerService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * Recently forwarded content per notification key (`package|id`), to suppress
+     * re-posts of identical text (apps often re-post/update the same notification,
+     * which would otherwise buzz the band again for an old message).
+     */
+    private data class Forwarded(val title: String, val body: String, val atMs: Long)
+
+    private val recentForwards = LinkedHashMap<String, Forwarded>()
+
+    /** Identical content forwarded within this window is treated as a re-post. */
+    private companion object {
+        const val DEDUP_WINDOW_MS = 10 * 60 * 1000L
+        const val MAX_TRACKED_KEYS = 100
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (sbn.packageName == packageName) return
         if (sbn.isOngoing) return
@@ -45,6 +60,10 @@ class NotificationCatcherService : NotificationListenerService() {
 
         scope.launch {
             if (!prefs.notifMirrorEnabled.first()) return@launch
+            if (isQuietNow()) {
+                Timber.v("NotificationCatcher: quiet hours — skipping #%d", sbn.id)
+                return@launch
+            }
             if (sbn.packageName !in prefs.enabledNotifApps.first()) {
                 Timber.v("NotificationCatcher: %s not enabled — skipping", sbn.packageName)
                 return@launch
@@ -60,6 +79,20 @@ class NotificationCatcherService : NotificationListenerService() {
                 )
                 return@launch
             }
+            val dedupKey = "${sbn.packageName}|${sbn.id}"
+            val isDupe = synchronized(recentForwards) {
+                recentForwards[dedupKey]?.let { prev ->
+                    prev.title == title && prev.body == text &&
+                            System.currentTimeMillis() - prev.atMs < DEDUP_WINDOW_MS
+                } ?: false
+            }
+            if (isDupe) {
+                Timber.i(
+                    "NotificationCatcher: re-post of recent #%d from %s — skipping",
+                    sbn.id, sbn.packageName
+                )
+                return@launch
+            }
             val appName = try {
                 packageManager.getApplicationLabel(
                     packageManager.getApplicationInfo(sbn.packageName, 0)
@@ -67,7 +100,17 @@ class NotificationCatcherService : NotificationListenerService() {
             } catch (e: Exception) {
                 sbn.packageName
             }
-            Timber.i("NotificationCatcher: mirroring #%d from %s", sbn.id, sbn.packageName)
+            Timber.i(
+                "NotificationCatcher: mirroring #%d from %s: %s",
+                sbn.id, sbn.packageName, title.take(60)
+            )
+            synchronized(recentForwards) {
+                recentForwards["${sbn.packageName}|${sbn.id}"] =
+                    Forwarded(title, text, System.currentTimeMillis())
+                while (recentForwards.size > MAX_TRACKED_KEYS) {
+                    recentForwards.remove(recentForwards.keys.first())
+                }
+            }
             bleManager.sendNotification(sbn.id, sbn.packageName, title, text, appName)
         }
     }
@@ -83,5 +126,17 @@ class NotificationCatcherService : NotificationListenerService() {
     override fun onDestroy() {
         scope.cancel()
         super.onDestroy()
+    }
+
+    private suspend fun isQuietNow(): Boolean {
+        if (!prefs.quietHoursEnabled.first()) return false
+        val cal = java.util.Calendar.getInstance()
+        val nowMin = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 +
+                cal.get(java.util.Calendar.MINUTE)
+        return prefs.isQuietNow(
+            nowMin,
+            prefs.quietHoursStartMin.first(),
+            prefs.quietHoursEndMin.first()
+        )
     }
 }

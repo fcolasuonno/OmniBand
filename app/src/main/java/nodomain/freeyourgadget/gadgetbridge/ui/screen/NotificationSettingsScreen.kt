@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsOff
@@ -30,10 +31,15 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.TimePickerDialog
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -63,7 +69,12 @@ fun NotificationSettingsScreen(
     val enabledApps by viewModel.enabledApps.collectAsStateWithLifecycle()
     val apps by viewModel.apps.collectAsStateWithLifecycle()
     val listenerEnabled by viewModel.listenerEnabled.collectAsStateWithLifecycle()
+    val quietHoursEnabled by viewModel.quietHoursEnabled.collectAsStateWithLifecycle()
+    val startMin by viewModel.quietHoursStartMin.collectAsStateWithLifecycle()
+    val endMin by viewModel.quietHoursEndMin.collectAsStateWithLifecycle()
     var query by remember { mutableStateOf("") }
+    var showStartPicker by remember { mutableStateOf(false) }
+    var showEndPicker by remember { mutableStateOf(false) }
 
     // Re-check listener access when returning from system settings
     DisposableEffect(lifecycleOwner) {
@@ -110,6 +121,40 @@ fun NotificationSettingsScreen(
                         checked = masterEnabled,
                         onCheckedChange = { viewModel.setMasterEnabled(it) }
                     )
+                }
+            }
+
+            item {
+                SettingsCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SettingsToggleRow(
+                            icon = Icons.Filled.Bedtime,
+                            title = "Quiet Hours",
+                            subtitle = "Pause mirroring overnight",
+                            checked = quietHoursEnabled,
+                            onCheckedChange = { viewModel.setQuietHoursEnabled(it) }
+                        )
+                        if (quietHoursEnabled) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedButton(
+                                    onClick = { showStartPicker = true },
+                                    modifier = Modifier.weight(1f)
+                                ) { Text("From " + fmtTime(startMin)) }
+                                OutlinedButton(
+                                    onClick = { showEndPicker = true },
+                                    modifier = Modifier.weight(1f)
+                                ) { Text("To " + fmtTime(endMin)) }
+                            }
+                            Text(
+                                "No notifications ${fmtTime(startMin)} – ${fmtTime(endMin)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                        }
+                    }
                 }
             }
 
@@ -243,4 +288,49 @@ fun NotificationSettingsScreen(
             item { Spacer(Modifier.height(16.dp)) }
         }
     }
+
+    if (showStartPicker) {
+        val state = rememberTimePickerState(
+            initialHour = startMin / 60,
+            initialMinute = startMin % 60,
+            is24Hour = android.text.format.DateFormat.is24HourFormat(context)
+        )
+        TimePickerDialog(
+            title = { Text("Quiet hours start") },
+            onDismissRequest = { showStartPicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    showStartPicker = false
+                    viewModel.setQuietHours(state.hour * 60 + state.minute, endMin)
+                }) { Text("OK") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStartPicker = false }) { Text("Cancel") }
+            }
+        ) { TimePicker(state = state) }
+    }
+
+    if (showEndPicker) {
+        val state = rememberTimePickerState(
+            initialHour = endMin / 60,
+            initialMinute = endMin % 60,
+            is24Hour = android.text.format.DateFormat.is24HourFormat(context)
+        )
+        TimePickerDialog(
+            title = { Text("Quiet hours end") },
+            onDismissRequest = { showEndPicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    showEndPicker = false
+                    viewModel.setQuietHours(startMin, state.hour * 60 + state.minute)
+                }) { Text("OK") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEndPicker = false }) { Text("Cancel") }
+            }
+        ) { TimePicker(state = state) }
+    }
 }
+
+private fun fmtTime(minutes: Int): String =
+    "%02d:%02d".format(minutes / 60, minutes % 60)

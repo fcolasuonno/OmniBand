@@ -378,4 +378,21 @@ class NotificationsViewModel @Inject constructor(
     fun setAppEnabled(packageName: String, enabled: Boolean) {
         viewModelScope.launch { prefs.setAppNotifEnabled(packageName, enabled) }
     }
+
+    val quietHoursEnabled: StateFlow<Boolean> = prefs.quietHoursEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val quietHoursStartMin: StateFlow<Int> = prefs.quietHoursStartMin
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 23 * 60 + 30)
+
+    val quietHoursEndMin: StateFlow<Int> = prefs.quietHoursEndMin
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 7 * 60)
+
+    fun setQuietHoursEnabled(enabled: Boolean) {
+        viewModelScope.launch { prefs.setQuietHoursEnabled(enabled) }
+    }
+
+    fun setQuietHours(startMin: Int, endMin: Int) {
+        viewModelScope.launch { prefs.setQuietHours(startMin, endMin) }
+    }
 }
