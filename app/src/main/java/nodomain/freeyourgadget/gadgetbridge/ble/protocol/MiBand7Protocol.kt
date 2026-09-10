@@ -825,8 +825,8 @@ class MiBand7Protocol(
 
         // Live HR for the dashboard: START once, then CONTINUE on an adaptive interval
         // to keep the band streaming (Gadgetbridge pattern — without CONTINUE the stream
-        // stalls). Fast (1 s) while the app is foregrounded or Sleep as Android tracks;
-        // slow (30 s) otherwise to save battery on both sides. The interval is pushed
+        // stalls). Fast (10 s) while the app is foregrounded or Sleep as Android tracks;
+        // slow (2 min) otherwise to save battery on both sides. The interval is pushed
         // by BleManager and read fresh every iteration.
         // Runs as a child of the protocol scope, so it dies with the connection.
         setHeartRateMonitoring(gatt, continuous = true)
@@ -837,14 +837,16 @@ class MiBand7Protocol(
             }
         }
 
-        // Poll battery and steps periodically. Battery is encrypted so it must be polled,
-        // but it drains slowly — every 30th cycle (~15 min) is plenty. Steps are polled
-        // every 10th cycle (~5 min) as a fallback alongside real-time push notifications.
+        // Poll battery and steps periodically as a fallback alongside real-time push
+        // notifications. Both drain slowly / arrive via push, so every 30th cycle
+        // (~15 min) is plenty.
         var pollCount = 0
         while (true) {
-            if (pollCount % 30 == 0) requestBattery(gatt)
-            delay(1_000)
-            if (pollCount % 10 == 0) requestCurrentSteps(gatt)
+            if (pollCount % 30 == 0) {
+                requestBattery(gatt)
+                delay(1_000)
+                requestCurrentSteps(gatt)
+            }
             delay(30_000)
             pollCount++
         }
@@ -1592,7 +1594,7 @@ class MiBand7Protocol(
     }
 
     override suspend fun onSleepTrackingStopped(gatt: BluetoothGatt) {
-        // NOTE: HR streaming is intentionally left running — the dashboard's 1s CONTINUE
+        // NOTE: HR streaming is intentionally left running — the dashboard's CONTINUE loop
         // loop owns it while connected; stopping here would blank the dashboard after
         // every sleep session. Only SpO2 (sleep-specific) is switched off.
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_SPO2, byteArrayOf(0x01, 0x00))

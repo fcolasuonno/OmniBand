@@ -716,8 +716,8 @@ class BleManager @Inject constructor(
     }
 
     /**
-     * Push the adaptive HR CONTINUE interval to the protocol. Fast (1 s) while the
-     * app is foregrounded or Sleep as Android tracks; slow (30 s) otherwise.
+     * Push the adaptive HR CONTINUE interval to the protocol. Fast (10 s) while the
+     * app is foregrounded or Sleep as Android tracks; slow (2 min) otherwise.
      */
     private fun updateHrContinueRate() {
         val fast = appForeground || sleepTrackingActive
