@@ -176,6 +176,11 @@ class MiBand7Protocol(
     private var rawSensorStreaming = false
     private var rawSensorJob: Job? = null
 
+    /** Alarm vibration loop (re-triggered until dismissed). */
+    @Volatile
+    private var alarmActive = false
+    private var alarmJob: Job? = null
+
     /** One-shot flag for logging the first raw packet of a session. */
     @Volatile
     private var rawStreamLogged = false
@@ -1518,11 +1523,33 @@ class MiBand7Protocol(
         setRawSensorEnabled(gatt, enabled = false)
     }
 
-    override suspend fun triggerAlarm(gatt: BluetoothGatt) =
-        writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x01))
+    override suspend fun triggerAlarm(gatt: BluetoothGatt) {
+        if (alarmActive) return
+        Timber.i("MiBand7: alarm triggered — vibrating until dismissed")
+        alarmActive = true
+        alarmJob?.cancel()
+        // A single START vibrates only briefly — re-trigger every 10 s until dismissed
+        // (protocol-scope child, dies with the connection).
+        alarmJob = scope.launch {
+            while (alarmActive) {
+                writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x03))
+                delay(10_000)
+            }
+        }
+    }
 
-    override suspend fun dismissAlarm(gatt: BluetoothGatt) =
-        writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x00))
+    override suspend fun dismissAlarm(gatt: BluetoothGatt) {
+        if (!alarmActive && alarmJob?.isActive != true) {
+            // Still send STOP — cheap and covers races (e.g. trigger lost).
+            Timber.d("MiBand7: alarm dismiss (was not active)")
+        } else {
+            Timber.i("MiBand7: alarm dismissed")
+        }
+        alarmActive = false
+        alarmJob?.cancel()
+        alarmJob = null
+        writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x06))
+    }
 
     override suspend fun setRawSensorEnabled(gatt: BluetoothGatt, enabled: Boolean) {
         rawSensorStreaming = enabled
