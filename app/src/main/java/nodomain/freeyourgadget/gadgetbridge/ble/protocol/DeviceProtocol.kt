@@ -82,6 +82,28 @@ interface DeviceProtocol {
     suspend fun syncTime(gatt: BluetoothGatt)
 
     /**
+     * Mirror a phone notification on the device.
+     *
+     * Default is a no-op for devices without a notification service.
+     */
+    suspend fun sendNotification(
+        gatt: BluetoothGatt,
+        id: Int,
+        appPackage: String,
+        title: String,
+        body: String,
+        appName: String,
+    ) {
+    }
+
+    /**
+     * Remove a mirrored notification from the device.
+     *
+     * Default is a no-op for devices without a notification service.
+     */
+    suspend fun dismissNotification(gatt: BluetoothGatt, id: Int) {}
+
+    /**
      * Enable or disable the inactivity (idle) reminder on the device.
      *
      * Default is a no-op for devices without a configuration service.

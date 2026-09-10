@@ -1,6 +1,7 @@
 package nodomain.freeyourgadget.gadgetbridge.ui.screen
 
 import android.content.Intent
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -18,6 +19,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.Bedtime
@@ -28,6 +30,7 @@ import androidx.compose.material.icons.filled.FitnessCenter
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Watch
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -60,7 +63,10 @@ import nodomain.freeyourgadget.gadgetbridge.data.db.entity.DeviceEntity
 import nodomain.freeyourgadget.gadgetbridge.ui.viewmodel.SettingsViewModel
 
 @Composable
-fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
+fun SettingsScreen(
+    viewModel: SettingsViewModel = hiltViewModel(),
+    onNotificationsClick: () -> Unit = {}
+) {
     val autoReconnect       by viewModel.autoReconnect.collectAsStateWithLifecycle()
     val sleepAndroid        by viewModel.sleepAsAndroidEnabled.collectAsStateWithLifecycle()
     val stepGoal            by viewModel.dailyStepGoal.collectAsStateWithLifecycle()
@@ -119,6 +125,39 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
                 checked = autoReconnect,
                 onCheckedChange = { viewModel.setAutoReconnect(it) }
             )
+        }
+
+        // ── Notifications ───────────────────────────────────────────
+        SectionHeader(Icons.Filled.Notifications, "Notifications")
+        SettingsCard {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onNotificationsClick)
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    Icons.Filled.Notifications,
+                    "Notifications",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Notification Mirroring", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Choose which apps forward to the band",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    "Open",
+                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                )
+            }
         }
 
         // ── Authentication ──────────────────────────────────────────

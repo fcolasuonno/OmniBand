@@ -166,6 +166,24 @@ object Huami2021Chunked {
     /** Config argument type: boolean. */
     const val CONFIG_TYPE_BOOL: Byte = 0x0b
 
+    // ── Notification service (endpoint 0x001e, encrypted) ─────────────────────
+
+    /** Notification service endpoint. */
+    const val ENDPOINT_NOTIFICATION: Short = 0x001e.toShort()
+
+    const val NOTIF_CMD_CAPABILITIES_REQUEST: Byte = 0x01
+    const val NOTIF_CMD_CAPABILITIES_RESPONSE: Byte = 0x02
+    const val NOTIF_CMD_SEND: Byte = 0x03
+    const val NOTIF_CMD_REPLY: Byte = 0x04
+    const val NOTIF_CMD_DISMISS: Byte = 0x05
+    const val NOTIF_CMD_REPLY_ACK: Byte = 0x06
+    const val NOTIF_CMD_ICON_REQUEST: Byte = 0x10
+
+    const val NOTIF_TYPE_NORMAL: Byte = 0xfa.toByte()
+    const val NOTIF_TYPE_SMS: Byte = 0x05
+    const val NOTIF_SUBCMD_SHOW: Byte = 0x00
+    const val NOTIF_SUBCMD_DISMISS_FROM_PHONE: Byte = 0x02
+
     // ── Activity fetch (endpoint 0x004b, Huami fetch protocol) ────────────────
 
     /** Fetch handshake: start-date request. */
@@ -202,6 +220,7 @@ object Huami2021Chunked {
     fun isEncrypted(endpoint: Short): Boolean = when (endpoint) {
         ENDPOINT_BATTERY,
         ENDPOINT_CONNECTION,
+        ENDPOINT_NOTIFICATION,
         ENDPOINT_ACTIVITY_FETCH,
         ENDPOINT_CONFIG,
         ENDPOINT_FIND_DEVICE,

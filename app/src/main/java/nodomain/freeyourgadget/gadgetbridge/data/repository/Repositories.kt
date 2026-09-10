@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
@@ -256,6 +257,18 @@ class UserPreferencesRepository @Inject constructor(
 
         // v2: reset the window so post-purge history (v4 DB) is fully re-pulled once.
         val LAST_HISTORY_FETCH_MS = longPreferencesKey("last_history_fetch_ms_v2")
+
+        val NOTIF_MIRROR_ENABLED = booleanPreferencesKey("notif_mirror_enabled")
+        val NOTIF_ENABLED_APPS = stringSetPreferencesKey("notif_enabled_apps")
+    }
+
+    companion object {
+        /** Pinned favorites, always listed first in this order. */
+        val PINNED_NOTIF_APPS = listOf(
+            "com.google.android.gm", // Gmail
+            "com.whatsapp",          // WhatsApp
+            "com.slack"              // Slack
+        )
     }
 
     val activeDeviceAddress: Flow<String?> = context.dataStore.data
@@ -314,5 +327,27 @@ class UserPreferencesRepository @Inject constructor(
 
     suspend fun setLastHistoryFetchMs(ms: Long) {
         context.dataStore.edit { it[Keys.LAST_HISTORY_FETCH_MS] = ms }
+    }
+
+    val notifMirrorEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[Keys.NOTIF_MIRROR_ENABLED] ?: false }
+
+    /**
+     * Packages allowed to mirror notifications. Defaults to the pinned favorites
+     * (Gmail, WhatsApp, Slack) on first run.
+     */
+    val enabledNotifApps: Flow<Set<String>> = context.dataStore.data
+        .map { it[Keys.NOTIF_ENABLED_APPS] ?: PINNED_NOTIF_APPS.toSet() }
+
+    suspend fun setNotifMirrorEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.NOTIF_MIRROR_ENABLED] = enabled }
+    }
+
+    suspend fun setAppNotifEnabled(packageName: String, enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.NOTIF_ENABLED_APPS] ?: PINNED_NOTIF_APPS.toSet()
+            prefs[Keys.NOTIF_ENABLED_APPS] =
+                if (enabled) current + packageName else current - packageName
+        }
     }
 }

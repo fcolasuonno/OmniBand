@@ -615,6 +615,56 @@ class MiBand7Protocol(
                 handleFetchControl(payload)
             }
 
+            Huami2021Chunked.ENDPOINT_NOTIFICATION -> {
+                when (payload.firstOrNull()?.toInt()?.and(0xFF)) {
+                    Huami2021Chunked.NOTIF_CMD_CAPABILITIES_RESPONSE.toInt() -> {
+                        Timber.d("MiBand7: notification capabilities [%s]", payload.toHex())
+                        notifCapWaiter?.complete(payload)
+                    }
+
+                    Huami2021Chunked.NOTIF_CMD_REPLY_ACK.toInt(),
+                    Huami2021Chunked.NOTIF_CMD_REPLY.toInt() ->
+                        Timber.i("MiBand7: notification ack [%s]", payload.toHex())
+
+                    Huami2021Chunked.NOTIF_CMD_ICON_REQUEST.toInt() -> {
+                        // `[0x10][package][00][format][width:2 LE][height:2 LE]`.
+                        // Serving icons needs the file-transfer session (TGA upload +
+                        // ICON_REQUEST_ACK) — not implemented yet, so parse + log the
+                        // exact parameters the band asks for.
+                        var pkgEnd = -1
+                        for (i in 1 until payload.size) {
+                            if (payload[i] == 0x00.toByte()) {
+                                pkgEnd = i
+                                break
+                            }
+                        }
+                        val pkg = if (pkgEnd > 1) {
+                            payload.copyOfRange(1, pkgEnd).toString(Charsets.UTF_8)
+                        } else {
+                            "?"
+                        }
+                        val o = if (pkgEnd > 1) pkgEnd + 1 else 1
+                        // Tail: [format][width:2 LE][height:2 LE] = 5 bytes at o..o+4.
+                        val fmt = payload.getOrNull(o)?.toInt()?.and(0xFF)
+                        val w = if (o + 5 <= payload.size) {
+                            (payload[o + 1].toInt() and 0xFF) or ((payload[o + 2].toInt() and 0xFF) shl 8)
+                        } else null
+                        val h = if (o + 5 <= payload.size) {
+                            (payload[o + 3].toInt() and 0xFF) or ((payload[o + 4].toInt() and 0xFF) shl 8)
+                        } else null
+                        Timber.i(
+                            "MiBand7: notification icon request pkg=%s format=0x%02x %dx%d (unanswered — file transfer not implemented)",
+                            pkg, fmt ?: -1, w ?: -1, h ?: -1
+                        )
+                    }
+
+                    else -> Timber.d(
+                        "MiBand7: unhandled notification payload [%s]",
+                        payload.toHex()
+                    )
+                }
+            }
+
             Huami2021Chunked.ENDPOINT_CONFIG -> {
                 when (payload.firstOrNull()?.toInt()?.and(0xFF)) {
                     Huami2021Chunked.CONFIG_CMD_ACK.toInt() ->
@@ -1551,6 +1601,106 @@ class MiBand7Protocol(
         writeChunked(gatt, Huami2021Chunked.ENDPOINT_FIND_DEVICE, byteArrayOf(0x06))
     }
 
+    // ── Notification mirroring (endpoint 0x001e, encrypted) ───────────────────
+    //
+    // Frame (Gadgetbridge layout): `[0x03 SEND][id:4 LE][type][0x00 SHOW]
+    //   [appPackage][00][title][00][body][00][appName][00][hasReply]`
+    // (+ one trailing 0x00 when the band reports capabilities version >= 5).
+    // Dismiss: `[0x03][id:4 LE][0xfa][0x02][00 × 5]` (12 bytes).
+
+    /** Cached notification-service capabilities version (null = not queried yet). */
+    @Volatile
+    private var notifVersion: Int? = null
+    private val notifVersionMutex = Mutex()
+
+    /**
+     * Mirror a phone notification on the band.
+     * @param id        Android notification id (band-side handle).
+     * @param appPackage Sending app's package name (drives the band icon lookup).
+     * @param title     Notification title (truncated to 64 chars).
+     * @param body      Notification text (truncated to 512 chars).
+     * @param appName   Human-readable app name shown under the text.
+     */
+    override suspend fun sendNotification(
+        gatt: BluetoothGatt,
+        id: Int,
+        appPackage: String,
+        title: String,
+        body: String,
+        appName: String,
+    ) {
+        val version = ensureNotifCapabilities(gatt)
+        Timber.i("MiBand7: forwarding notification #%d from %s", id, appPackage)
+        val payload = ByteArrayOutputStream().apply {
+            write(Huami2021Chunked.NOTIF_CMD_SEND.toInt())
+            write(intToLeBytes(id))
+            write(Huami2021Chunked.NOTIF_TYPE_NORMAL.toInt())
+            write(Huami2021Chunked.NOTIF_SUBCMD_SHOW.toInt())
+            write(appPackage.toByteArray(Charsets.UTF_8))
+            write(0)
+            write(title.take(64).toByteArray(Charsets.UTF_8))
+            write(0)
+            write(body.take(512).toByteArray(Charsets.UTF_8))
+            write(0)
+            write(appName.take(64).toByteArray(Charsets.UTF_8))
+            write(0)
+            write(0) // hasReply = false
+            if (version >= 5) write(0) // silent flag
+        }.toByteArray()
+        writeChunked(gatt, Huami2021Chunked.ENDPOINT_NOTIFICATION, payload)
+    }
+
+    /** Remove a notification from the band (best-effort). */
+    override suspend fun dismissNotification(gatt: BluetoothGatt, id: Int) {
+        Timber.d("MiBand7: dismissing notification #%d", id)
+        val payload = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN).apply {
+            put(Huami2021Chunked.NOTIF_CMD_SEND)
+            putInt(id)
+            put(Huami2021Chunked.NOTIF_TYPE_NORMAL)
+            put(Huami2021Chunked.NOTIF_SUBCMD_DISMISS_FROM_PHONE)
+            put(0); put(0); put(0); put(0); put(0)
+        }.array()
+        writeChunked(gatt, Huami2021Chunked.ENDPOINT_NOTIFICATION, payload)
+    }
+
+    /**
+     * Query the notification-service capabilities version once per connection.
+     * @return version, or 4 (no v5 extras) when the band does not answer.
+     */
+    private suspend fun ensureNotifCapabilities(gatt: BluetoothGatt): Int {
+        notifVersion?.let { return it }
+        return notifVersionMutex.withLock {
+            notifVersion?.let { return it }
+            val waiter = CompletableDeferred<ByteArray>()
+            notifCapWaiter = waiter
+            try {
+                writeChunked(
+                    gatt, Huami2021Chunked.ENDPOINT_NOTIFICATION,
+                    byteArrayOf(Huami2021Chunked.NOTIF_CMD_CAPABILITIES_REQUEST)
+                )
+                val resp = withTimeoutOrNull(5_000) { waiter.await() }
+                val version = if (resp != null && resp.size >= 2 &&
+                    resp[0] == Huami2021Chunked.NOTIF_CMD_CAPABILITIES_RESPONSE
+                ) {
+                    resp[1].toInt() and 0xFF
+                } else {
+                    4
+                }
+                Timber.i("MiBand7: notification service version=%d", version)
+                notifVersion = version
+                version
+            } finally {
+                if (notifCapWaiter === waiter) notifCapWaiter = null
+            }
+        }
+    }
+
+    @Volatile
+    private var notifCapWaiter: CompletableDeferred<ByteArray>? = null
+
+    private fun intToLeBytes(v: Int): ByteArray =
+        ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v).array()
+
     override suspend fun setRawSensorEnabled(gatt: BluetoothGatt, enabled: Boolean) {
         rawSensorStreaming = enabled
         if (enabled) {
@@ -1714,6 +1864,9 @@ class MiBand7Protocol(
         awaitDescriptorWrite = null
         awaitCharacteristicWrite = null
         sessionGatt = null
+        notifVersion = null
+        notifCapWaiter?.cancel()
+        notifCapWaiter = null
         fetchPhase = FetchPhase.IDLE
         fetchMeta?.cancel()
         fetchMeta = null

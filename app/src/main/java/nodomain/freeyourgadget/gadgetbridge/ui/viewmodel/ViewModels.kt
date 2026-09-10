@@ -1,6 +1,8 @@
 package nodomain.freeyourgadget.gadgetbridge.ui.viewmodel
 
 import android.app.Application
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -289,5 +291,91 @@ class SettingsViewModel @Inject constructor(
 
     fun saveAuthKey(key: String) {
         viewModelScope.launch { prefs.saveAuthKey(key) }
+    }
+}
+
+// =====================================================================
+// Notifications ViewModel (mirroring app picker)
+// =====================================================================
+
+@HiltViewModel
+class NotificationsViewModel @Inject constructor(
+    private val app: Application,
+    private val prefs: UserPreferencesRepository
+) : ViewModel() {
+
+    data class NotifApp(
+        val packageName: String,
+        val label: String,
+        val icon: androidx.compose.ui.graphics.ImageBitmap?,
+        val pinned: Boolean
+    )
+
+    val masterEnabled: StateFlow<Boolean> = prefs.notifMirrorEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val enabledApps: StateFlow<Set<String>> = prefs.enabledNotifApps
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
+    private val _apps = MutableStateFlow<List<NotifApp>>(emptyList())
+    val apps: StateFlow<List<NotifApp>> = _apps.asStateFlow()
+
+    private val _listenerEnabled = MutableStateFlow(false)
+    val listenerEnabled: StateFlow<Boolean> = _listenerEnabled.asStateFlow()
+
+    init {
+        viewModelScope.launch(Dispatchers.IO) { loadApps() }
+        refreshListenerState()
+    }
+
+    private fun loadApps() {
+        val pm = app.packageManager
+        val pinned = UserPreferencesRepository.PINNED_NOTIF_APPS
+        val own = app.packageName
+        val seen = linkedSetOf<String>()
+        val entries =
+            mutableListOf<Triple<String, String, androidx.compose.ui.graphics.ImageBitmap?>>()
+        for (ri in pm.queryIntentActivities(
+            android.content.Intent(android.content.Intent.ACTION_MAIN)
+                .addCategory(android.content.Intent.CATEGORY_LAUNCHER), 0
+        )) {
+            val pkg = ri.activityInfo.packageName
+            if (pkg == own || !seen.add(pkg)) continue
+            val label = ri.loadLabel(pm).toString().ifBlank { pkg }
+            val icon = try {
+                ri.loadIcon(pm)?.toBitmap()?.asImageBitmap()
+            } catch (e: Exception) {
+                null
+            }
+            entries.add(Triple(pkg, label, icon))
+        }
+        _apps.value = entries
+            .sortedWith(
+                compareBy(
+                    { e -> pinned.indexOf(e.first).let { if (it == -1) Int.MAX_VALUE else it } },
+                    { e -> e.second.lowercase() }
+                )
+            )
+            .map { (pkg, label, icon) -> NotifApp(pkg, label, icon, pkg in pinned) }
+    }
+
+    fun refreshListenerState() {
+        val cn = android.content.ComponentName(
+            app, nodomain.freeyourgadget.gadgetbridge.service.NotificationCatcherService::class.java
+        )
+        val flat = android.provider.Settings.Secure.getString(
+            app.contentResolver, "enabled_notification_listeners"
+        )
+        _listenerEnabled.value = flat?.split(":")?.any {
+            android.content.ComponentName.unflattenFromString(it) == cn
+        } == true
+    }
+
+    fun setMasterEnabled(enabled: Boolean) {
+        viewModelScope.launch { prefs.setNotifMirrorEnabled(enabled) }
+    }
+
+    fun setAppEnabled(packageName: String, enabled: Boolean) {
+        viewModelScope.launch { prefs.setAppNotifEnabled(packageName, enabled) }
     }
 }

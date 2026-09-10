@@ -610,6 +610,32 @@ class BleManager @Inject constructor(
         activeGatt?.let { activeProtocol?.setInactivityWarnings(it, enabled) }
     }
 
+    /** Mirror a phone notification on the connected device (best-effort). */
+    suspend fun sendNotification(
+        id: Int,
+        appPackage: String,
+        title: String,
+        body: String,
+        appName: String
+    ) {
+        val gatt = activeGatt ?: return
+        try {
+            activeProtocol?.sendNotification(gatt, id, appPackage, title, body, appName)
+        } catch (e: Exception) {
+            Timber.w(e, "BleManager: sendNotification failed")
+        }
+    }
+
+    /** Remove a mirrored notification from the connected device (best-effort). */
+    suspend fun dismissNotification(id: Int) {
+        val gatt = activeGatt ?: return
+        try {
+            activeProtocol?.dismissNotification(gatt, id)
+        } catch (e: Exception) {
+            Timber.w(e, "BleManager: dismissNotification failed")
+        }
+    }
+
     /**
      * Pull sleep sessions recorded since [sinceMs] (Huami fetch protocol).
      * Returns parsed sessions (possibly empty). Safe to call any time; yields

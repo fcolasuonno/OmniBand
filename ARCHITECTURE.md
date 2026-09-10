@@ -457,4 +457,4 @@ BleManager.deviceEvents  ←── SharedFlow (replay=1)
   controls the BLE configuration channel.
 - **GATT error 133**: Fully mitigated at the application level but ultimately inherent to
   Android's BT stack on certain device/ROM combinations.
-- **Future**: Notification mirroring, firmware update support, home-screen widget.
+- **Future**: firmware update support, home-screen widget.

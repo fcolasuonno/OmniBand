@@ -33,6 +33,7 @@ import nodomain.freeyourgadget.gadgetbridge.service.DeviceService
 import nodomain.freeyourgadget.gadgetbridge.ui.screen.DashboardScreen
 import nodomain.freeyourgadget.gadgetbridge.ui.screen.DeviceScanScreen
 import nodomain.freeyourgadget.gadgetbridge.ui.screen.HealthScreen
+import nodomain.freeyourgadget.gadgetbridge.ui.screen.NotificationSettingsScreen
 import nodomain.freeyourgadget.gadgetbridge.ui.screen.SettingsScreen
 import nodomain.freeyourgadget.gadgetbridge.ui.theme.OmniBandTheme
 
@@ -117,7 +118,14 @@ fun OmniBandApp() {
             composable(Screen.Dashboard.route) { DashboardScreen(navController) }
             composable(Screen.Health.route)    { HealthScreen() }
             composable(Screen.Devices.route)   { DeviceScanScreen(navController) }
-            composable(Screen.Settings.route)  { SettingsScreen() }
+            composable(Screen.Settings.route) {
+                SettingsScreen(onNotificationsClick = {
+                    navController.navigate(
+                        "notifications"
+                    )
+                })
+            }
+            composable("notifications") { NotificationSettingsScreen(navController) }
         }
     }
 }
