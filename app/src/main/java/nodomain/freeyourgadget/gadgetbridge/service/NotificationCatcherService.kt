@@ -131,6 +131,7 @@ class NotificationCatcherService : NotificationListenerService() {
         if (sbn.packageName == packageName) return
         scope.launch {
             if (!prefs.notifMirrorEnabled.first()) return@launch
+            Timber.d("NotificationCatcher: dismissed #%d from %s", sbn.id, sbn.packageName)
             bleManager.dismissNotification(sbn.id)
         }
     }
