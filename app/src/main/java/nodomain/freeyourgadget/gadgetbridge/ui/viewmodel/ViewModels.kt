@@ -343,7 +343,9 @@ class NotificationsViewModel @Inject constructor(
                 .addCategory(android.content.Intent.CATEGORY_LAUNCHER), 0
         )) {
             val pkg = ri.activityInfo.packageName
-            if (pkg == own || !seen.add(pkg)) continue
+            // Own package can never mirror (filtered in the catcher); Sleep as Android
+            // is excluded too — we are its companion, its notifications never go back.
+            if (pkg == own || pkg == "com.urbandroid.sleep" || !seen.add(pkg)) continue
             val label = ri.loadLabel(pm).toString().ifBlank { pkg }
             val icon = try {
                 ri.loadIcon(pm)?.toBitmap()?.asImageBitmap()

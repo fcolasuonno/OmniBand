@@ -62,11 +62,16 @@ class NotificationCatcherService : NotificationListenerService() {
         const val CONTENT_DEDUP_WINDOW_MS = 30 * 60 * 1000L
         const val STALE_NOTIF_AGE_MS = 10 * 60 * 1000L
         const val MAX_TRACKED_KEYS = 200
+        const val SLEEP_PACKAGE = "com.urbandroid.sleep"
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (sbn.packageName == packageName) return
-        if (sbn.isOngoing) return
+        // Never mirror Sleep as Android itself: we are its companion, so its
+        // notifications (lullaby playback, tracking status) would only echo back
+        // phone-side state to the band. Not recorded in history either, since the
+        // lullaby notification updates constantly.
+        if (sbn.packageName == SLEEP_PACKAGE) return
         val notification = sbn.notification
         if ((notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return
 
