@@ -89,6 +89,14 @@ class SleepAsAndroidSender @Inject constructor(
     private val movementBuffer = mutableListOf<Float>()
     private var lastHrFlushMs = 0L
 
+    // Overnight diagnostics: batch counters summarized hourly so a silent stall
+    // (flat SaA graphs with a live band connection) is visible in one grep.
+    private var hrBatchesSent = 0
+    private var hrSamplesSent = 0
+    private var movementBatchesSent = 0
+    private var movementSamplesSent = 0
+    private var summaryWindowStartMs = System.currentTimeMillis()
+
     // Raw-accelerometer aggregation window (Gadgetbridge pattern): the strongest
     // magnitude seen since the last tick. Falls back to stillness when the band
     // streams nothing (stream off / unsupported device).
@@ -154,7 +162,12 @@ class SleepAsAndroidSender @Inject constructor(
             movementTicker = senderScope.launch {
                 while (true) {
                     delay(MOVEMENT_TICK_MS)
-                    tickMovement()
+                    try {
+                        tickMovement()
+                    } catch (e: Exception) {
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        Timber.w(e, "SleepAsAndroidSender: movement tick failed (ticker survives)")
+                    }
                 }
             }
         }
@@ -212,6 +225,9 @@ class SleepAsAndroidSender @Inject constructor(
         }
         context.sendBroadcast(intent)
         Timber.v("SleepAsAndroidSender: sent HR batch (size=%d)", batch.size)
+        hrBatchesSent++
+        hrSamplesSent += batch.size
+        maybeLogHourlySummary()
     }
 
     private fun flushMovementBatch() {
@@ -225,6 +241,26 @@ class SleepAsAndroidSender @Inject constructor(
         }
         context.sendBroadcast(intent)
         Timber.v("SleepAsAndroidSender: sent actigraphy batch (size=%d)", batch.size)
+        movementBatchesSent++
+        movementSamplesSent += batch.size
+        maybeLogHourlySummary()
+    }
+
+    /** Hourly rollup of what actually left toward Sleep as Android. */
+    private fun maybeLogHourlySummary() {
+        val now = System.currentTimeMillis()
+        if (now - summaryWindowStartMs >= 3_600_000L) {
+            Timber.i(
+                "SleepAsAndroidSender: last hour → HR %d batch(es)/%d sample(s), " +
+                        "movement %d batch(es)/%d sample(s)",
+                hrBatchesSent, hrSamplesSent, movementBatchesSent, movementSamplesSent
+            )
+            hrBatchesSent = 0
+            hrSamplesSent = 0
+            movementBatchesSent = 0
+            movementSamplesSent = 0
+            summaryWindowStartMs = now
+        }
     }
 
     // ── Watch control → Sleep as Android ──────────────────────────────────────

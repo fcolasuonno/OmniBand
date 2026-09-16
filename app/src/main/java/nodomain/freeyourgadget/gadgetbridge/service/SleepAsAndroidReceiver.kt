@@ -57,6 +57,9 @@ class SleepAsAndroidReceiver : BroadcastReceiver() {
     @Inject
     lateinit var sleepAsAndroidSender: SleepAsAndroidSender
 
+    @Inject
+    lateinit var eventLog: nodomain.freeyourgadget.gadgetbridge.data.repository.EventLogRepository
+
     private val receiverScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     /** Pending delayed alarm vibration (START_ALARM with DELAY > 0); cancelled by STOP_ALARM. */
@@ -98,11 +101,13 @@ class SleepAsAndroidReceiver : BroadcastReceiver() {
                         intent.getBooleanExtra("DO_HR_MONITORING", true),
                         intent.getBooleanExtra("DO_OXIMETER_MONITORING", false)
                     )
+                    eventLog.log("saa", "START_TRACKING")
                     bleManager.onSleepTrackingStarted()
                     sleepAsAndroidSender.startMovementTicker()
                 }
 
                 ACTION_STOP_TRACKING, ACTION_SLEEP_STOPPED -> {
+                    eventLog.log("saa", "STOP_TRACKING")
                     bleManager.onSleepTrackingStopped()
                     sleepAsAndroidSender.stopMovementTicker()
                 }
@@ -113,6 +118,7 @@ class SleepAsAndroidReceiver : BroadcastReceiver() {
                     val delayMs = intent.getIntExtra("DELAY", 0)
                     pendingAlarmJob?.cancel()
                     pendingAlarmJob = null
+                    eventLog.log("saa", "START_ALARM delayMs=$delayMs")
                     when {
                         delayMs == -1 -> Timber.i(
                             "SleepAsAndroidReceiver: START_ALARM with DELAY=-1 (disabled) — ignoring"
@@ -136,6 +142,7 @@ class SleepAsAndroidReceiver : BroadcastReceiver() {
                 ACTION_STOP_ALARM, ACTION_ALARM_DISMISS -> {
                     pendingAlarmJob?.cancel()
                     pendingAlarmJob = null
+                    eventLog.log("saa", "STOP_ALARM")
                     bleManager.dismissAlarm()
                 }
 
@@ -143,6 +150,7 @@ class SleepAsAndroidReceiver : BroadcastReceiver() {
                     // Snooze = stop current alarm vibration
                     pendingAlarmJob?.cancel()
                     pendingAlarmJob = null
+                    eventLog.log("saa", "SNOOZE")
                     bleManager.dismissAlarm()
                 }
 

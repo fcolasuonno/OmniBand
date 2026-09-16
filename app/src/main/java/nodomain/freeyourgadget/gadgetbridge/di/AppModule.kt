@@ -12,8 +12,10 @@ import nodomain.freeyourgadget.gadgetbridge.data.db.MIGRATION_1_2
 import nodomain.freeyourgadget.gadgetbridge.data.db.MIGRATION_2_3
 import nodomain.freeyourgadget.gadgetbridge.data.db.MIGRATION_3_4
 import nodomain.freeyourgadget.gadgetbridge.data.db.MIGRATION_4_5
+import nodomain.freeyourgadget.gadgetbridge.data.db.MIGRATION_5_6
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.BatteryDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.DeviceDao
+import nodomain.freeyourgadget.gadgetbridge.data.db.dao.EventLogDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.HeartRateDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.NotificationLogDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.SleepDao
@@ -21,6 +23,7 @@ import nodomain.freeyourgadget.gadgetbridge.data.db.dao.SpO2Dao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StepsDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StressDao
 import nodomain.freeyourgadget.gadgetbridge.data.repository.DeviceRepository
+import nodomain.freeyourgadget.gadgetbridge.data.repository.EventLogRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.HealthRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.NotificationLogRepository
 import javax.inject.Singleton
@@ -33,7 +36,13 @@ object DatabaseModule {
     @Provides
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "freeyourgadget.gadgetbridge.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+            .addMigrations(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6
+            )
             .fallbackToDestructiveMigration(dropAllTables = true)
             .build()
 
@@ -49,6 +58,9 @@ object DatabaseModule {
     @Provides
     fun provideNotificationLogDao(db: AppDatabase): NotificationLogDao =
         db.notificationLogDao()
+
+    @Provides
+    fun provideEventLogDao(db: AppDatabase): EventLogDao = db.eventLogDao()
 }
 
 @Module
@@ -77,4 +89,9 @@ object RepositoryModule {
     fun provideNotificationLogRepository(
         notificationLogDao: NotificationLogDao
     ): NotificationLogRepository = NotificationLogRepository(notificationLogDao)
+
+    @Singleton
+    @Provides
+    fun provideEventLogRepository(eventLogDao: EventLogDao): EventLogRepository =
+        EventLogRepository(eventLogDao)
 }

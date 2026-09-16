@@ -8,6 +8,7 @@ import androidx.room.Query
 import kotlinx.coroutines.flow.Flow
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.BatteryEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.DeviceEntity
+import nodomain.freeyourgadget.gadgetbridge.data.db.entity.EventLogEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.HeartRateEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.NotificationLogEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepSessionEntity
@@ -146,6 +147,24 @@ interface NotificationLogDao {
 
     @Query("DELETE FROM notification_log")
     suspend fun clearAll()
+}
+
+@Dao
+interface EventLogDao {
+    @Query("SELECT * FROM event_log ORDER BY timestamp DESC LIMIT 500")
+    fun getRecent(): Flow<List<EventLogEntity>>
+
+    @Query("SELECT * FROM event_log ORDER BY timestamp DESC LIMIT :limit")
+    suspend fun getRecentSync(limit: Int = 500): List<EventLogEntity>
+
+    @Insert
+    suspend fun insert(entity: EventLogEntity)
+
+    @Query("DELETE FROM event_log WHERE timestamp < :cutoffMs")
+    suspend fun pruneOlderThan(cutoffMs: Long)
+
+    @Query("DELETE FROM event_log WHERE id NOT IN (SELECT id FROM event_log ORDER BY timestamp DESC LIMIT :keep)")
+    suspend fun trimToSize(keep: Int)
 }
 
 @Dao

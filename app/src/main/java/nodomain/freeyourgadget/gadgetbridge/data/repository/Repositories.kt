@@ -17,6 +17,7 @@ import nodomain.freeyourgadget.gadgetbridge.ble.DeviceType
 import nodomain.freeyourgadget.gadgetbridge.ble.protocol.SleepStageSample
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.BatteryDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.DeviceDao
+import nodomain.freeyourgadget.gadgetbridge.data.db.dao.EventLogDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.HeartRateDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.NotificationLogDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.SleepDao
@@ -25,6 +26,7 @@ import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StepsDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StressDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.BatteryEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.DeviceEntity
+import nodomain.freeyourgadget.gadgetbridge.data.db.entity.EventLogEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.HeartRateEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.NotificationLogEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepSessionEntity
@@ -479,4 +481,37 @@ class NotificationLogRepository @Inject constructor(
     }
 
     suspend fun clearAll() = notificationLogDao.clearAll()
+}
+
+// =====================================================================
+// Persistent diagnostics event log (survives logcat rotation)
+// =====================================================================
+
+/**
+ * Ring log of key lifecycle events (service start, connection transitions, SaA
+ * tracking/alarm commands, history sync outcomes). Each entry is one row;
+ * rows older than 7 days (and everything past 2000 rows) are pruned on write.
+ * This is what makes next-morning diagnosis possible after logcat rotated.
+ */
+@Singleton
+class EventLogRepository @Inject constructor(
+    private val eventLogDao: EventLogDao
+) {
+    companion object {
+        const val RETENTION_MS = 7L * 24 * 60 * 60 * 1000
+        const val MAX_ROWS = 2000
+    }
+
+    fun recent(): Flow<List<EventLogEntity>> = eventLogDao.getRecent()
+
+    suspend fun log(tag: String, message: String) {
+        try {
+            eventLogDao.insert(EventLogEntity(tag = tag, message = message))
+            val now = System.currentTimeMillis()
+            eventLogDao.pruneOlderThan(now - RETENTION_MS)
+            eventLogDao.trimToSize(MAX_ROWS)
+        } catch (e: Exception) {
+            android.util.Log.w("EventLog", "log failed", e)
+        }
+    }
 }

@@ -737,10 +737,18 @@ class BleManager @Inject constructor(
     }
 
     suspend fun triggerAlarm() {
+        if (activeGatt == null) {
+            Timber.w("BleManager: triggerAlarm with no GATT — band disconnected, alarm lost")
+            return
+        }
         activeGatt?.let { activeProtocol?.triggerAlarm(it) }
     }
 
     suspend fun dismissAlarm() {
+        if (activeGatt == null) {
+            Timber.w("BleManager: dismissAlarm with no GATT — band disconnected")
+            return
+        }
         activeGatt?.let { activeProtocol?.dismissAlarm(it) }
     }
 

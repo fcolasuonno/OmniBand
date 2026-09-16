@@ -66,6 +66,14 @@ data class StressEntity(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+@Entity(tableName = "event_log")
+data class EventLogEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val timestamp: Long = System.currentTimeMillis(),
+    val tag: String, // conn, saa, sync, alarm, auth
+    val message: String
+)
+
 @Entity(tableName = "notification_log")
 data class NotificationLogEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

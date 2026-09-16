@@ -35,6 +35,7 @@ import nodomain.freeyourgadget.gadgetbridge.ble.isConnected
 import nodomain.freeyourgadget.gadgetbridge.ble.protocol.DeviceEvent
 import nodomain.freeyourgadget.gadgetbridge.ble.protocol.SleepStage
 import nodomain.freeyourgadget.gadgetbridge.data.repository.DeviceRepository
+import nodomain.freeyourgadget.gadgetbridge.data.repository.EventLogRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.HealthRepository
 import nodomain.freeyourgadget.gadgetbridge.data.repository.UserPreferencesRepository
 import nodomain.freeyourgadget.gadgetbridge.ui.MainActivity
@@ -77,6 +78,9 @@ class DeviceService : LifecycleService() {
     lateinit var preferencesRepository: UserPreferencesRepository
     @Inject
     lateinit var sleepAsAndroidSender: SleepAsAndroidSender
+
+    @Inject
+    lateinit var eventLog: EventLogRepository
 
     private val notificationManager by lazy { getSystemService(NotificationManager::class.java) }
 
@@ -123,6 +127,9 @@ class DeviceService : LifecycleService() {
         observeIdleAlertSetting()
         schedulePeriodicHistorySync()
         autoConnectSavedDevice()
+        lifecycleScope.launch {
+            eventLog.log("svc", "service created")
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -183,6 +190,7 @@ class DeviceService : LifecycleService() {
                     is ConnectionState.Error -> "Error: ${state.message}"
                 }
                 notificationManager.notify(NOTIFICATION_ID, buildNotification(text))
+                launch { eventLog.log("conn", state.toString()) }
 
                 if (state.isConnected) {
                     deviceRepository.updateLastConnected((state as ConnectionState.Connected).address)
@@ -370,6 +378,12 @@ class DeviceService : LifecycleService() {
                 Timber.i(
                     "DeviceService: history sync: %d sleep, %d SpO2, %d stress new",
                     importedSleep, importedSpo2, importedStress
+                )
+                eventLog.log(
+                    "sync",
+                    "history sync: %d sleep, %d SpO2, %d stress new".format(
+                        importedSleep, importedSpo2, importedStress
+                    )
                 )
             } catch (e: Exception) {
                 Timber.w(e, "DeviceService: history sync failed")

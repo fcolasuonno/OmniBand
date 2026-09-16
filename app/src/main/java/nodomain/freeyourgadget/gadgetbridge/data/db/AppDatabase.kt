@@ -6,6 +6,7 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.BatteryDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.DeviceDao
+import nodomain.freeyourgadget.gadgetbridge.data.db.dao.EventLogDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.HeartRateDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.NotificationLogDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.SleepDao
@@ -14,6 +15,7 @@ import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StepsDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.dao.StressDao
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.BatteryEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.DeviceEntity
+import nodomain.freeyourgadget.gadgetbridge.data.db.entity.EventLogEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.HeartRateEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.NotificationLogEntity
 import nodomain.freeyourgadget.gadgetbridge.data.db.entity.SleepSessionEntity
@@ -70,6 +72,18 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
     }
 }
 
+val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `event_log` (" +
+                    "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "`timestamp` INTEGER NOT NULL, " +
+                    "`tag` TEXT NOT NULL, " +
+                    "`message` TEXT NOT NULL)"
+        )
+    }
+}
+
 @Database(
     entities = [
         DeviceEntity::class,
@@ -80,9 +94,10 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
         SpO2Entity::class,
         BatteryEntity::class,
         StressEntity::class,
-        NotificationLogEntity::class
+        NotificationLogEntity::class,
+        EventLogEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -94,4 +109,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun batteryDao(): BatteryDao
     abstract fun stressDao(): StressDao
     abstract fun notificationLogDao(): NotificationLogDao
+    abstract fun eventLogDao(): EventLogDao
 }

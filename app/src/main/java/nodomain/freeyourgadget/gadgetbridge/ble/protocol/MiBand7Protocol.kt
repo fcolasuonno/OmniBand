@@ -757,9 +757,25 @@ class MiBand7Protocol(
                 // Auth result: [0x10][0x05][status]
                 val success = payload.size >= 3 && payload[2] == Huami2021Chunked.AUTH_SUCCESS
                 if (success) {
-                    Timber.i("MiBand7: authentication SUCCESS ✓")
+                    val sessionKey = pendingEncKey
+                    if (sessionKey == null) {
+                        if (decoder.sessionKey != null) {
+                            // Duplicate/late auth result after an established handshake
+                            // (band retransmit or retried key exchange). The live session
+                            // key must survive — ignore without touching anything.
+                            Timber.d("MiBand7: duplicate auth result — keeping established session")
+                        } else {
+                            Timber.e("MiBand7: auth result with no session key — failing")
+                            failAuth()
+                        }
+                        return
+                    }
+                    Timber.i(
+                        "MiBand7: authentication SUCCESS ✓ [proto=%08x]",
+                        System.identityHashCode(this)
+                    )
                     isAuthenticated = true
-                    decoder.sessionKey = pendingEncKey
+                    decoder.sessionKey = sessionKey
                     encryptedSeq = pendingEncSeq
 
                     scope.launch {
@@ -1809,6 +1825,14 @@ class MiBand7Protocol(
                 decoder.sessionKey
             } else {
                 null
+            }
+            if (Huami2021Chunked.isEncrypted(endpoint) && key == null) {
+                Timber.w(
+                    "MiBand7: ENCRYPTED endpoint 0x%04x sent PLAINTEXT " +
+                            "[proto=%08x authed=%s sessionKeySet=%s]",
+                    endpoint.toInt() and 0xFFFF, System.identityHashCode(this),
+                    isAuthenticated, decoder.sessionKey != null
+                )
             }
             val seq = if (key != null) encryptedSeq++ else 0
 
